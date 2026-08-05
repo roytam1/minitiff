@@ -1069,7 +1069,7 @@ static int minitiff_stb_zlib_decode(const unsigned char *input,
 {
     int result;
 
-    result = stbi__zlib_decode_buffer((char *)output,
+    result = stbi_zlib_decode_buffer((char *)output,
                                       output_length,
                                       (const char *)input,
                                       input_length);
@@ -1263,7 +1263,7 @@ static int tiff_decode_strip(const TIFF_Context *tiff,
 #ifdef MINITIFF_USE_STB_ZLIB
     case 8:
     case 32946:
-        return tiff_zlib_decode(
+        return minitiff_zlib_decode(
             tiff->data + offset,
             (size_t)byte_count,
             destination,
