@@ -132,6 +132,7 @@ typedef struct TIFF_Entry {
 typedef struct TIFF_Page {
     minitiff_uint32 width;
     minitiff_uint32 height;
+    minitiff_uint32 rows_per_strip;
 
     minitiff_uint16 compression;
     minitiff_uint16 photometric;
@@ -637,7 +638,10 @@ static int tiff_parse_page(const TIFF_Context *t,
             break;
 
         case 278: /* RowsPerStrip */
-            /* Not actually needed because strip byte counts are used. */
+            if (!tiff_entry_get_u32(t, &e, 0, &v))
+                return 0;
+
+            page->rows_per_strip = v;
             break;
 
         case 279: /* StripByteCounts */
@@ -1328,12 +1332,10 @@ static TIFF_Image *tiff_decode_page(const TIFF_Context *t,
         permits arbitrary strip organization. For a small decoder,
         use an even distribution based on strip count.
     */
-    rows_per_strip =
-        (p->height + p->strip_count - 1) /
-        p->strip_count;
+    rows_per_strip = p->rows_per_strip;
 
     if (rows_per_strip == 0)
-        rows_per_strip = 1;
+        return NULL;
 
     /*
         Decode each strip.
