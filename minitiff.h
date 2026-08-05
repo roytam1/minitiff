@@ -1,44 +1,77 @@
 /*
-    minitiff.c
-    Small dependency-free TIFF decoder.
+    minitiff_v2_c89.c
 
-    C99
-    No external dependencies.
+    Small, human-readable TIFF decoder.
 
-    Supported:
-      - Classic TIFF (not BigTIFF)
-      - II / MM byte order
-      - 8-bit samples
-      - Grayscale
-      - Grayscale + alpha
-      - RGB
-      - RGBA
-      - Palette color
-      - Strips
-      - Uncompressed
-      - PackBits
-      - LZW
-      - Predictor 2 (horizontal)
+    C89-compatible core. No C99 types, declarations in for-loops, // comments,
+    or C99-only language features are used.
+
+    Output is always RGBA8.
+
+    Supported by the core decoder:
+
+      - Classic TIFF (version 42), not BigTIFF
+      - Little-endian (II) and big-endian (MM)
       - Multiple IFDs/pages
+      - Strips
+      - RowsPerStrip
+      - 1, 2, 4 and 8 bit grayscale
+      - 1, 2, 4 and 8 bit palette images
+      - 8 bit RGB and RGBA
+      - Compression = 1   (none)
+      - Compression = 5   (LZW)
+      - Compression = 32773 (PackBits)
+      - Predictor = 1 and 2 for byte-oriented data
 
-    Output:
-      Always RGBA8.
+    Optional features:
+
+      MINITIFF_USE_STB_IMAGE
+
+        Include stb_image.h and use stbi_load_from_memory() for JPEG-in-TIFF
+        strips (Compression = 6). This is useful because stb_image already
+        contains a good JPEG decoder.
+
+        The user must provide stb_image.h in the include path.
+
+        This source does NOT define STB_IMAGE_IMPLEMENTATION. The application
+        should do that once, in one C file, before including stb_image.h.
+
+      MINITIFF_USE_ZLIB
+
+        Use zlib for Deflate (Compression = 8 and 32946).
+
+        zlib is deliberately a separate option. stb_image's internal zlib
+        routines are not a stable public API, so this decoder does not depend
+        on private stb_image symbols.
 
     Example:
 
-        TIFF_Image *img = tiff_load_file("test.tif", 0);
+        TIFF_Image *image;
 
-        if (img) {
-            printf("%u x %u\n", img->width, img->height);
+        image = tiff_load_file("picture.tif", 0);
+        if (image) {
+            unsigned char *rgba = image->pixels;
+            unsigned long width = image->width;
+            unsigned long height = image->height;
 
-            // img->pixels contains width * height * 4 bytes
-            // RGBA8.
+            ...
 
-            tiff_free(img);
+            tiff_free(image);
         }
 
-    This implementation deliberately does not try to be a complete
-    TIFF implementation.
+    Optional stb_image build:
+
+        cc -DMINITIFF_USE_STB_IMAGE -c MINITIFF_v2_c89.c
+
+    The application must arrange for stb_image's implementation to be built
+    exactly once, for example:
+
+        #define STB_IMAGE_IMPLEMENTATION
+        #include "stb_image.h"
+
+    Optional zlib build:
+
+        cc -DMINITIFF_USE_ZLIB ... -lz
 */
 #ifndef _MINITFF_H
 #define _MINITFF_H
@@ -48,17 +81,12 @@
 #include <string.h>
 #include <limits.h>
 
-#if defined(_MSC_VER) && _MSC_VER < 1600
-typedef   signed char    minitiff_int8;
-typedef unsigned char    minitiff_uint8;
-typedef unsigned short   minitiff_uint16;
-typedef unsigned int     minitiff_uint32;
-#else
-#include <stdint.h>
-typedef int8_t           minitiff_int8;
-typedef uint8_t          minitiff_uint8;
-typedef uint16_t         minitiff_uint16;
-typedef uint32_t         minitiff_uint32;
+#ifdef MINITIFF_USE_STB_IMAGE
+#include "stb_image.h"
+#endif
+
+#ifdef MINITIFF_USE_ZLIB
+#include <zlib.h>
 #endif
 
 #ifndef SIZE_MAX
@@ -69,121 +97,97 @@ typedef uint32_t         minitiff_uint32;
 #ifdef TIFF_TEST
 #define MINITIFF_IMPLEMENTATION
 #endif
+
 /* ------------------------------------------------------------------------- */
 /* Public API                                                               */
 /* ------------------------------------------------------------------------- */
 
 typedef struct TIFF_Image {
-    minitiff_uint32 width;
-    minitiff_uint32 height;
-
-    /* Always 4. */
-    minitiff_uint32 channels;
-
-    /* Always 8. */
-    minitiff_uint32 bits_per_channel;
-
-    /* width * height * 4 bytes. */
-    minitiff_uint8 *pixels;
+    unsigned long width;
+    unsigned long height;
+    unsigned long channels;
+    unsigned long bits_per_channel;
+    unsigned char *pixels;
 } TIFF_Image;
 
-
-/*
-    Load page_index from TIFF data.
-
-    page_index == 0 means first IFD/page.
-*/
 TIFF_Image *tiff_load(const void *data, size_t size, unsigned page_index);
-
-/*
-    Load a TIFF file from disk.
-*/
 TIFF_Image *tiff_load_file(const char *filename, unsigned page_index);
-
-/*
-    Free image.
-*/
 void tiff_free(TIFF_Image *image);
 
 
 #ifdef MINITIFF_IMPLEMENTATION
 /* ------------------------------------------------------------------------- */
-/* Internal helpers                                                         */
+/* Internal TIFF structures                                                  */
 /* ------------------------------------------------------------------------- */
 
 typedef struct TIFF_Context {
-    const minitiff_uint8 *data;
+    const unsigned char *data;
     size_t size;
-
     int little_endian;
-
-    minitiff_uint32 ifd_offset;
+    unsigned long first_ifd;
 } TIFF_Context;
 
 
 typedef struct TIFF_Entry {
-    minitiff_uint16 tag;
-    minitiff_uint16 type;
-    minitiff_uint32 count;
-    minitiff_uint32 value_offset;
+    unsigned short tag;
+    unsigned short type;
+    unsigned long count;
+    unsigned long value;
 } TIFF_Entry;
 
 
 typedef struct TIFF_Page {
-    minitiff_uint32 width;
-    minitiff_uint32 height;
-    minitiff_uint32 rows_per_strip;
+    unsigned long width;
+    unsigned long height;
+    unsigned long rows_per_strip;
 
-    minitiff_uint16 compression;
-    minitiff_uint16 photometric;
+    unsigned short compression;
+    unsigned short photometric;
+    unsigned short samples_per_pixel;
+    unsigned short planar_config;
+    unsigned short predictor;
 
-    minitiff_uint16 samples_per_pixel;
+    unsigned short bits_per_sample[4];
+    unsigned short bits_count;
 
-    minitiff_uint16 bits_per_sample[4];
-    minitiff_uint16 bits_count;
+    unsigned short extra_samples[4];
+    unsigned short extra_count;
 
-    minitiff_uint16 planar_config;
+    unsigned long *strip_offsets;
+    unsigned long *strip_byte_counts;
+    unsigned long strip_count;
 
-    minitiff_uint16 predictor;
-
-    minitiff_uint16 extra_samples[4];
-    minitiff_uint16 extra_count;
-
-    minitiff_uint32 *strip_offsets;
-    minitiff_uint32 *strip_byte_counts;
-    minitiff_uint32 strip_count;
-
-    minitiff_uint16 *color_map;
-    minitiff_uint32 color_map_count;
+    unsigned short *color_map;
+    unsigned long color_map_count;
 } TIFF_Page;
 
 
 /* ------------------------------------------------------------------------- */
-/* Safe integer helpers                                                      */
+/* Safe size arithmetic                                                      */
 /* ------------------------------------------------------------------------- */
 
-static int tiff_mul_size(size_t a, size_t b, size_t *out)
+static int tiff_mul_size(size_t a, size_t b, size_t *result)
 {
-    if (b != 0 && a > SIZE_MAX / b)
+    if (b != 0 && a > (size_t)-1 / b)
         return 0;
 
-    *out = a * b;
+    *result = a * b;
     return 1;
 }
 
 
-static int tiff_add_size(size_t a, size_t b, size_t *out)
+static int tiff_add_size(size_t a, size_t b, size_t *result)
 {
-    if (a > SIZE_MAX - b)
+    if (a > (size_t)-1 - b)
         return 0;
 
-    *out = a + b;
+    *result = a + b;
     return 1;
 }
 
 
-static int tiff_range_ok(const TIFF_Context *t,
-                         minitiff_uint32 offset,
+static int tiff_range_ok(const TIFF_Context *tiff,
+                         unsigned long offset,
                          size_t length)
 {
     size_t end;
@@ -191,7 +195,7 @@ static int tiff_range_ok(const TIFF_Context *t,
     if (!tiff_add_size((size_t)offset, length, &end))
         return 0;
 
-    return end <= t->size;
+    return end <= tiff->size;
 }
 
 
@@ -199,39 +203,43 @@ static int tiff_range_ok(const TIFF_Context *t,
 /* Endian helpers                                                            */
 /* ------------------------------------------------------------------------- */
 
-static minitiff_uint16 tiff_u16(const TIFF_Context *t, const minitiff_uint8 *p)
+static unsigned short tiff_u16(const TIFF_Context *tiff,
+                               const unsigned char *p)
 {
-    if (t->little_endian) {
-        return (minitiff_uint16)p[0] |
-               ((minitiff_uint16)p[1] << 8);
+    if (tiff->little_endian) {
+        return (unsigned short)(
+            (unsigned short)p[0] |
+            ((unsigned short)p[1] << 8));
     }
 
-    return ((minitiff_uint16)p[0] << 8) |
-           (minitiff_uint16)p[1];
+    return (unsigned short)(
+        ((unsigned short)p[0] << 8) |
+        (unsigned short)p[1]);
 }
 
 
-static minitiff_uint32 tiff_u32(const TIFF_Context *t, const minitiff_uint8 *p)
+static unsigned long tiff_u32(const TIFF_Context *tiff,
+                              const unsigned char *p)
 {
-    if (t->little_endian) {
-        return (minitiff_uint32)p[0] |
-               ((minitiff_uint32)p[1] << 8) |
-               ((minitiff_uint32)p[2] << 16) |
-               ((minitiff_uint32)p[3] << 24);
+    if (tiff->little_endian) {
+        return (unsigned long)p[0] |
+               ((unsigned long)p[1] << 8) |
+               ((unsigned long)p[2] << 16) |
+               ((unsigned long)p[3] << 24);
     }
 
-    return ((minitiff_uint32)p[0] << 24) |
-           ((minitiff_uint32)p[1] << 16) |
-           ((minitiff_uint32)p[2] << 8) |
-           (minitiff_uint32)p[3];
+    return ((unsigned long)p[0] << 24) |
+           ((unsigned long)p[1] << 16) |
+           ((unsigned long)p[2] << 8) |
+           (unsigned long)p[3];
 }
 
 
 /* ------------------------------------------------------------------------- */
-/* TIFF type sizes                                                           */
+/* TIFF field types                                                          */
 /* ------------------------------------------------------------------------- */
 
-static size_t tiff_type_size(minitiff_uint16 type)
+static size_t tiff_type_size(unsigned short type)
 {
     switch (type) {
     case 1:  /* BYTE */
@@ -261,140 +269,93 @@ static size_t tiff_type_size(minitiff_uint16 type)
 
 
 /* ------------------------------------------------------------------------- */
-/* Entry data access                                                         */
+/* TIFF entry access                                                         */
 /* ------------------------------------------------------------------------- */
 
 /*
-    Return pointer to the actual value bytes of an IFD entry.
+    Get the raw value area belonging to an IFD entry.
+
+    TIFF stores values of four bytes or less directly inside the entry.
+    Larger values are referenced by an offset.
 */
-static const minitiff_uint8 *tiff_entry_data(const TIFF_Context *t,
-                                      const TIFF_Entry *e,
-                                      size_t *total_size)
+static int tiff_entry_data(const TIFF_Context *tiff,
+                           const TIFF_Entry *entry,
+                           unsigned char raw[4],
+                           const unsigned char **data,
+                           size_t *size)
 {
     size_t type_size;
-    size_t size;
+    size_t total_size;
+    unsigned long value;
 
-    type_size = tiff_type_size(e->type);
-    if (!type_size)
-        return NULL;
+    type_size = tiff_type_size(entry->type);
+    if (type_size == 0)
+        return 0;
 
-    if (!tiff_mul_size(type_size, e->count, &size))
-        return NULL;
+    if (!tiff_mul_size(type_size,
+                       (size_t)entry->count,
+                       &total_size))
+        return 0;
 
-    *total_size = size;
+    *size = total_size;
 
-    if (size <= 4) {
-        /*
-            The value is stored directly in the 4-byte value field.
-        */
-        if (!tiff_range_ok(t, e->value_offset, 4))
-            return NULL;
+    if (total_size <= 4) {
+        value = entry->value;
 
-        /*
-            value_offset points to the field itself in this case.
-            Caller needs the address of that field, not a newly
-            interpreted integer.
-        */
-        return NULL;
+        if (tiff->little_endian) {
+            raw[0] = (unsigned char)(value);
+            raw[1] = (unsigned char)(value >> 8);
+            raw[2] = (unsigned char)(value >> 16);
+            raw[3] = (unsigned char)(value >> 24);
+        }
+        else {
+            raw[0] = (unsigned char)(value >> 24);
+            raw[1] = (unsigned char)(value >> 16);
+            raw[2] = (unsigned char)(value >> 8);
+            raw[3] = (unsigned char)(value);
+        }
+
+        *data = raw;
+        return 1;
     }
 
-    if (!tiff_range_ok(t, e->value_offset, size))
-        return NULL;
+    if (!tiff_range_ok(tiff, entry->value, total_size))
+        return 0;
 
-    return t->data + e->value_offset;
+    *data = tiff->data + entry->value;
+    return 1;
 }
 
 
 /*
-    Get an integer value from an entry.
-
-    Works for BYTE, SHORT and LONG.
+    Get a BYTE, SHORT or LONG entry value as an unsigned long.
 */
-static int tiff_entry_get_u32(const TIFF_Context *t,
-                              const TIFF_Entry *e,
-                              minitiff_uint32 index,
-                              minitiff_uint32 *result)
+static int tiff_entry_get_u32(const TIFF_Context *tiff,
+                              const TIFF_Entry *entry,
+                              unsigned long index,
+                              unsigned long *result)
 {
-    size_t type_size;
-    size_t total;
-    const minitiff_uint8 *p;
+    unsigned char raw[4];
+    const unsigned char *data;
+    size_t size;
 
-    if (index >= e->count)
+    if (index >= entry->count)
         return 0;
 
-    type_size = tiff_type_size(e->type);
-    if (!type_size)
+    if (!tiff_entry_data(tiff, entry, raw, &data, &size))
         return 0;
 
-    if (!tiff_mul_size(type_size, e->count, &total))
-        return 0;
-
-    if (total <= 4) {
-        /*
-            Locate the four bytes containing the inline value.
-            The value field begins at the entry's value_offset member.
-        */
-        p = (const minitiff_uint8 *)&e->value_offset;
-
-        /*
-            e->value_offset itself has already been decoded using the
-            file's endian order, so we cannot use its memory representation
-            directly for big-endian files.
-
-            Construct the original 4-byte field instead.
-        */
-        {
-            minitiff_uint8 raw[4];
-
-            if (t->little_endian) {
-                raw[0] = (minitiff_uint8)(e->value_offset);
-                raw[1] = (minitiff_uint8)(e->value_offset >> 8);
-                raw[2] = (minitiff_uint8)(e->value_offset >> 16);
-                raw[3] = (minitiff_uint8)(e->value_offset >> 24);
-            } else {
-                raw[0] = (minitiff_uint8)(e->value_offset >> 24);
-                raw[1] = (minitiff_uint8)(e->value_offset >> 16);
-                raw[2] = (minitiff_uint8)(e->value_offset >> 8);
-                raw[3] = (minitiff_uint8)e->value_offset;
-            }
-
-            p = raw;
-
-            switch (e->type) {
-            case 1:
-                *result = p[index];
-                return 1;
-
-            case 3:
-                *result = tiff_u16(t, p + index * 2);
-                return 1;
-
-            case 4:
-                *result = tiff_u32(t, p + index * 4);
-                return 1;
-
-            default:
-                return 0;
-            }
-        }
-    }
-
-    if (!tiff_range_ok(t, e->value_offset, total))
-        return 0;
-
-    p = t->data + e->value_offset;
-
-    switch (e->type) {
+    switch (entry->type) {
     case 1:
-        *result = p[index];
+        *result = data[index];
         return 1;
 
     case 3:
-        *result = tiff_u16(t, p + index * 2);
+        *result = tiff_u16(tiff, data + index * 2);
         return 1;
 
     case 4:
-        *result = tiff_u32(t, p + index * 4);
+        *result = tiff_u32(tiff, data + index * 4);
         return 1;
 
     default:
@@ -404,313 +365,309 @@ static int tiff_entry_get_u32(const TIFF_Context *t,
 
 
 /* ------------------------------------------------------------------------- */
-/* IFD handling                                                              */
+/* Dynamic arrays                                                            */
 /* ------------------------------------------------------------------------- */
 
-static int tiff_read_entry(const TIFF_Context *t,
-                           const minitiff_uint8 *p,
-                           TIFF_Entry *e)
+static int tiff_load_u32_array(const TIFF_Context *tiff,
+                               const TIFF_Entry *entry,
+                               unsigned long **result,
+                               unsigned long *count)
 {
-    e->tag          = tiff_u16(t, p + 0);
-    e->type         = tiff_u16(t, p + 2);
-    e->count        = tiff_u32(t, p + 4);
-    e->value_offset = tiff_u32(t, p + 8);
+    unsigned long *array;
+    unsigned long i;
+    unsigned long value;
 
-    return 1;
-}
-
-
-static int tiff_find_ifd(const TIFF_Context *t,
-                         unsigned page_index,
-                         minitiff_uint32 *ifd_result)
-{
-    minitiff_uint32 ifd;
-    unsigned page;
-
-    ifd = t->ifd_offset;
-
-    for (page = 0; page < page_index; ++page) {
-        minitiff_uint16 count;
-        size_t bytes;
-        size_t next_pos;
-
-        if (!tiff_range_ok(t, ifd, 2))
-            return 0;
-
-        count = tiff_u16(t, t->data + ifd);
-
-        if (!tiff_mul_size((size_t)count, 12, &bytes))
-            return 0;
-
-        if (!tiff_add_size((size_t)ifd, 2, &next_pos))
-            return 0;
-
-        if (!tiff_add_size(next_pos, bytes, &next_pos))
-            return 0;
-
-        if (!tiff_add_size(next_pos, 4, &next_pos))
-            return 0;
-
-        if (next_pos > t->size)
-            return 0;
-
-        ifd = tiff_u32(t, t->data + ifd + 2 + bytes);
-
-        if (ifd == 0)
-            return 0;
-    }
-
-    *ifd_result = ifd;
-    return 1;
-}
-
-
-/* ------------------------------------------------------------------------- */
-/* Page parsing                                                              */
-/* ------------------------------------------------------------------------- */
-
-static void tiff_page_free(TIFF_Page *p)
-{
-    free(p->strip_offsets);
-    free(p->strip_byte_counts);
-    free(p->color_map);
-
-    memset(p, 0, sizeof(*p));
-}
-
-
-static int tiff_load_u32_array(const TIFF_Context *t,
-                               const TIFF_Entry *e,
-                               minitiff_uint32 **out,
-                               minitiff_uint32 *count)
-{
-    minitiff_uint32 *a;
-    minitiff_uint32 i;
-
-    if (e->type != 3 && e->type != 4)
+    if (entry->type != 3 && entry->type != 4)
         return 0;
 
-    if (e->count == 0 || e->count > SIZE_MAX / sizeof(minitiff_uint32))
+    if ((size_t)entry->count >
+        (size_t)-1 / sizeof(unsigned long))
         return 0;
 
-    a = (minitiff_uint32 *)malloc((size_t)e->count * sizeof(minitiff_uint32));
-    if (!a)
+    array = (unsigned long *)malloc(
+        (size_t)entry->count * sizeof(unsigned long));
+
+    if (!array)
         return 0;
 
-    for (i = 0; i < e->count; ++i) {
-        if (!tiff_entry_get_u32(t, e, i, &a[i])) {
-            free(a);
-            return 0;
-        }
-    }
-
-    *out = a;
-    *count = e->count;
-    return 1;
-}
-
-
-static int tiff_load_u16_array(const TIFF_Context *t,
-                               const TIFF_Entry *e,
-                               minitiff_uint16 **out,
-                               minitiff_uint32 *count)
-{
-    minitiff_uint16 *a;
-    minitiff_uint32 i;
-    minitiff_uint32 v;
-
-    if (e->type != 3)
-        return 0;
-
-    if (e->count == 0 ||
-        (size_t)e->count > SIZE_MAX / sizeof(minitiff_uint16))
-        return 0;
-
-    a = (minitiff_uint16 *)malloc((size_t)e->count *
-                           sizeof(minitiff_uint16));
-
-    if (!a)
-        return 0;
-
-    for (i = 0; i < e->count; ++i) {
-        if (!tiff_entry_get_u32(t, e, i, &v) ||
-            v > 65535) {
-            free(a);
+    for (i = 0; i < entry->count; ++i) {
+        if (!tiff_entry_get_u32(tiff, entry, i, &value)) {
+            free(array);
             return 0;
         }
 
-        a[i] = (minitiff_uint16)v;
+        array[i] = value;
     }
 
-    *out = a;
-    *count = e->count;
+    *result = array;
+    *count = entry->count;
     return 1;
 }
 
 
-static int tiff_parse_page(const TIFF_Context *t,
-                           minitiff_uint32 ifd_offset,
-                           TIFF_Page *page)
+static int tiff_load_u16_array(const TIFF_Context *tiff,
+                               const TIFF_Entry *entry,
+                               unsigned short **result,
+                               unsigned long *count)
 {
-    minitiff_uint16 count;
-    minitiff_uint16 i;
+    unsigned short *array;
+    unsigned long i;
+    unsigned long value;
+
+    if (entry->type != 3)
+        return 0;
+
+    if ((size_t)entry->count >
+        (size_t)-1 / sizeof(unsigned short))
+        return 0;
+
+    array = (unsigned short *)malloc(
+        (size_t)entry->count * sizeof(unsigned short));
+
+    if (!array)
+        return 0;
+
+    for (i = 0; i < entry->count; ++i) {
+        if (!tiff_entry_get_u32(tiff, entry, i, &value) ||
+            value > 65535UL) {
+            free(array);
+            return 0;
+        }
+
+        array[i] = (unsigned short)value;
+    }
+
+    *result = array;
+    *count = entry->count;
+    return 1;
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* Page cleanup                                                              */
+/* ------------------------------------------------------------------------- */
+
+static void tiff_page_free(TIFF_Page *page)
+{
+    free(page->strip_offsets);
+    free(page->strip_byte_counts);
+    free(page->color_map);
+
+    memset(page, 0, sizeof(*page));
+}
+
+
+/* ------------------------------------------------------------------------- */
+/* IFD parsing                                                               */
+/* ------------------------------------------------------------------------- */
+
+static int tiff_parse_ifd(const TIFF_Context *tiff,
+                          unsigned long offset,
+                          TIFF_Page *page)
+{
+    unsigned short entry_count;
+    unsigned short i;
 
     memset(page, 0, sizeof(*page));
 
+    /* Baseline TIFF defaults. */
     page->compression = 1;
     page->planar_config = 1;
     page->predictor = 1;
 
-    if (!tiff_range_ok(t, ifd_offset, 2))
+    if (!tiff_range_ok(tiff, offset, 2))
         return 0;
 
-    count = tiff_u16(t, t->data + ifd_offset);
+    entry_count = tiff_u16(tiff, tiff->data + offset);
 
-    if (!tiff_range_ok(t,
-                       ifd_offset + 2,
-                       (size_t)count * 12 + 4))
-        return 0;
+    /* 2-byte count + entries + 4-byte next-IFD pointer. */
+    {
+        size_t entries_size;
+        size_t total_size;
 
-    for (i = 0; i < count; ++i) {
-        TIFF_Entry e;
-        minitiff_uint32 v;
+        if (!tiff_mul_size((size_t)entry_count,
+                           12,
+                           &entries_size))
+            return 0;
 
-        tiff_read_entry(t,
-                        t->data + ifd_offset + 2 + (size_t)i * 12,
-                        &e);
+        if (!tiff_add_size(entries_size, 6, &total_size))
+            return 0;
 
-        switch (e.tag) {
+        if (!tiff_range_ok(tiff, offset, total_size))
+            return 0;
+    }
 
+    for (i = 0; i < entry_count; ++i) {
+        TIFF_Entry entry;
+        const unsigned char *p;
+        unsigned long value;
+
+        p = tiff->data + offset + 2 + (size_t)i * 12;
+
+        entry.tag = tiff_u16(tiff, p + 0);
+        entry.type = tiff_u16(tiff, p + 2);
+        entry.count = tiff_u32(tiff, p + 4);
+        entry.value = tiff_u32(tiff, p + 8);
+
+        switch (entry.tag) {
         case 256: /* ImageWidth */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &page->width))
                 return 0;
-            page->width = v;
             break;
 
         case 257: /* ImageLength */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &page->height))
                 return 0;
-            page->height = v;
             break;
 
         case 258: /* BitsPerSample */
-            if (e.count > 4)
+            if (entry.count > 4)
                 return 0;
 
-            page->bits_count = (minitiff_uint16)e.count;
+            page->bits_count =
+                (unsigned short)entry.count;
 
             {
-                minitiff_uint32 j;
+                unsigned long j;
 
-                for (j = 0; j < e.count; ++j) {
-                    if (!tiff_entry_get_u32(t, &e, j, &v) ||
-                        v > 65535)
+                for (j = 0; j < entry.count; ++j) {
+                    if (!tiff_entry_get_u32(tiff,
+                                            &entry,
+                                            j,
+                                            &value) ||
+                        value > 16UL)
                         return 0;
 
-                    page->bits_per_sample[j] = (minitiff_uint16)v;
+                    page->bits_per_sample[j] =
+                        (unsigned short)value;
                 }
             }
             break;
 
         case 259: /* Compression */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &value) ||
+                value > 65535UL)
                 return 0;
-            page->compression = (minitiff_uint16)v;
+
+            page->compression =
+                (unsigned short)value;
             break;
 
         case 262: /* PhotometricInterpretation */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &value) ||
+                value > 65535UL)
                 return 0;
-            page->photometric = (minitiff_uint16)v;
+
+            page->photometric =
+                (unsigned short)value;
             break;
 
         case 273: /* StripOffsets */
-            if (!tiff_load_u32_array(t, &e,
+            if (!tiff_load_u32_array(tiff,
+                                     &entry,
                                      &page->strip_offsets,
                                      &page->strip_count))
                 return 0;
             break;
 
         case 277: /* SamplesPerPixel */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &value) ||
+                value > 65535UL)
                 return 0;
-            page->samples_per_pixel = (minitiff_uint16)v;
+
+            page->samples_per_pixel =
+                (unsigned short)value;
             break;
 
         case 278: /* RowsPerStrip */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &page->rows_per_strip))
                 return 0;
-
-            page->rows_per_strip = v;
             break;
 
         case 279: /* StripByteCounts */
             {
-                minitiff_uint32 n;
+                unsigned long count;
 
-                if (!tiff_load_u32_array(t, &e,
-                                         &page->strip_byte_counts,
-                                         &n))
+                if (!tiff_load_u32_array(
+                        tiff,
+                        &entry,
+                        &page->strip_byte_counts,
+                        &count))
                     return 0;
 
-                /*
-                    StripOffsets and StripByteCounts should have
-                    matching counts.
-                */
                 if (page->strip_count != 0 &&
-                    page->strip_count != n)
+                    page->strip_count != count)
                     return 0;
 
-                page->strip_count = n;
+                page->strip_count = count;
             }
             break;
 
         case 284: /* PlanarConfiguration */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &value) ||
+                value > 65535UL)
                 return 0;
-            page->planar_config = (minitiff_uint16)v;
+
+            page->planar_config =
+                (unsigned short)value;
             break;
 
         case 317: /* Predictor */
-            if (!tiff_entry_get_u32(t, &e, 0, &v))
+            if (!tiff_entry_get_u32(tiff, &entry, 0,
+                                    &value) ||
+                value > 65535UL)
                 return 0;
-            page->predictor = (minitiff_uint16)v;
+
+            page->predictor =
+                (unsigned short)value;
             break;
 
         case 320: /* ColorMap */
-            if (!tiff_load_u16_array(t, &e,
+            if (!tiff_load_u16_array(tiff,
+                                     &entry,
                                      &page->color_map,
                                      &page->color_map_count))
                 return 0;
             break;
 
         case 338: /* ExtraSamples */
-            if (e.count > 4)
+            if (entry.count > 4)
                 return 0;
 
-            page->extra_count = (minitiff_uint16)e.count;
+            page->extra_count =
+                (unsigned short)entry.count;
 
             {
-                minitiff_uint32 j;
+                unsigned long j;
 
-                for (j = 0; j < e.count; ++j) {
-                    if (!tiff_entry_get_u32(t, &e, j, &v) ||
-                        v > 65535)
+                for (j = 0; j < entry.count; ++j) {
+                    if (!tiff_entry_get_u32(tiff,
+                                            &entry,
+                                            j,
+                                            &value) ||
+                        value > 65535UL)
                         return 0;
 
-                    page->extra_samples[j] = (minitiff_uint16)v;
+                    page->extra_samples[j] =
+                        (unsigned short)value;
                 }
             }
             break;
 
         default:
+            /* Unknown tags are harmless; ignore them. */
             break;
         }
     }
 
-    /*
-        Defaults mandated/commonly used by baseline TIFF.
-    */
+    /* Baseline defaults. */
     if (page->samples_per_pixel == 0) {
         if (page->photometric == 2)
             page->samples_per_pixel = 3;
@@ -721,121 +678,139 @@ static int tiff_parse_page(const TIFF_Context *t,
     if (page->bits_count == 0) {
         page->bits_count = page->samples_per_pixel;
 
-        /*
-            In practice BitsPerSample should exist. This fallback is
-            intentionally conservative.
-        */
         if (page->bits_count > 4)
             return 0;
 
-        {
-            minitiff_uint16 j;
-
-            for (j = 0; j < page->bits_count; ++j)
-                page->bits_per_sample[j] = 8;
-        }
+        for (i = 0; i < page->bits_count; ++i)
+            page->bits_per_sample[i] = 8;
     }
 
     if (page->width == 0 ||
         page->height == 0 ||
+        page->rows_per_strip == 0 ||
         page->strip_count == 0 ||
-        !page->strip_offsets ||
-        !page->strip_byte_counts)
+        page->strip_offsets == NULL ||
+        page->strip_byte_counts == NULL)
         return 0;
 
     if (page->samples_per_pixel == 0 ||
         page->samples_per_pixel > 4)
         return 0;
 
-    if (page->bits_count != 1 &&
-        page->bits_count != page->samples_per_pixel)
-        return 0;
-
-    {
-        minitiff_uint16 j;
-
-        for (j = 0; j < page->bits_count; ++j) {
-            if (page->bits_per_sample[j] != 8)
-                return 0;
-        }
-    }
-
     if (page->planar_config != 1)
-        return 0;
-
-    if (page->photometric != 0 &&
-        page->photometric != 1 &&
-        page->photometric != 2 &&
-        page->photometric != 3)
         return 0;
 
     if (page->compression != 1 &&
         page->compression != 5 &&
-        page->compression != 32773)
+        page->compression != 6 &&
+        page->compression != 8 &&
+        page->compression != 32773 &&
+        page->compression != 32946)
         return 0;
 
     if (page->predictor != 1 &&
         page->predictor != 2)
         return 0;
 
-    if (page->photometric == 3 && !page->color_map)
+    if (page->photometric > 3)
         return 0;
+
+    if (page->photometric == 2 &&
+        page->samples_per_pixel < 3)
+        return 0;
+
+    if (page->photometric == 3 &&
+        page->color_map == NULL)
+        return 0;
+
+    if (page->bits_count != 1 &&
+        page->bits_count != page->samples_per_pixel)
+        return 0;
+
+    for (i = 0; i < page->bits_count; ++i) {
+        unsigned short bits = page->bits_per_sample[i];
+
+        if (bits != 1 && bits != 2 &&
+            bits != 4 && bits != 8)
+            return 0;
+
+        if (page->photometric == 2 && bits != 8)
+            return 0;
+    }
+
+    /* JPEG and Deflate are optional. */
+    if (page->compression == 6) {
+#ifndef MINITIFF_USE_STB_IMAGE
+        return 0;
+#endif
+    }
+
+    if (page->compression == 8 ||
+        page->compression == 32946) {
+#ifndef MINITIFF_USE_ZLIB
+        return 0;
+#endif
+    }
 
     return 1;
 }
 
 
 /* ------------------------------------------------------------------------- */
-/* PackBits decoder                                                           */
+/* PackBits decoder                                                          */
 /* ------------------------------------------------------------------------- */
 
-static int tiff_packbits_decode(const minitiff_uint8 *src,
+static int tiff_packbits_decode(const unsigned char *src,
                                 size_t src_size,
-                                minitiff_uint8 *dst,
+                                unsigned char *dst,
                                 size_t dst_size)
 {
-    size_t si = 0;
-    size_t di = 0;
+    size_t src_pos;
+    size_t dst_pos;
 
-    while (si < src_size && di < dst_size) {
-        minitiff_int8 n = (minitiff_int8)src[si++];
+    src_pos = 0;
+    dst_pos = 0;
+
+    while (src_pos < src_size && dst_pos < dst_size) {
+        int n;
+
+        n = (int)(signed char)src[src_pos++];
 
         if (n >= 0) {
-            size_t count = (size_t)n + 1;
+            size_t count;
 
-            if (si > src_size - count)
+            count = (size_t)n + 1;
+
+            if (count > src_size - src_pos ||
+                count > dst_size - dst_pos)
                 return 0;
 
-            if (di > dst_size - count)
-                return 0;
+            memcpy(dst + dst_pos,
+                   src + src_pos,
+                   count);
 
-            memcpy(dst + di, src + si, count);
-
-            si += count;
-            di += count;
+            src_pos += count;
+            dst_pos += count;
         }
-        else if (n >= -127) {
-            size_t count = (size_t)(1 - n);
+        else if (n != -128) {
+            size_t count;
 
-            if (si >= src_size)
+            count = (size_t)(1 - n);
+
+            if (src_pos >= src_size ||
+                count > dst_size - dst_pos)
                 return 0;
 
-            if (di > dst_size - count)
-                return 0;
+            memset(dst + dst_pos,
+                   src[src_pos],
+                   count);
 
-            memset(dst + di, src[si], count);
-
-            ++si;
-            di += count;
-        }
-        else {
-            /*
-                -128 is a NOP.
-            */
+            ++src_pos;
+            dst_pos += count;
         }
     }
 
-    return di == dst_size;
+    return dst_pos == dst_size;
 }
 
 
@@ -843,10 +818,17 @@ static int tiff_packbits_decode(const minitiff_uint8 *src,
 /* TIFF LZW decoder                                                          */
 /* ------------------------------------------------------------------------- */
 
+/*
+    TIFF LZW is MSB-first.
+
+    This is different from GIF LZW, which is commonly implemented using
+    LSB-first code packing. TIFF also uses the historical "early change"
+    code-width rule.
+*/
 typedef struct TIFF_LZW {
     int prefix[4096];
-    minitiff_uint8 suffix[4096];
-    minitiff_uint8 stack[4096];
+    unsigned char suffix[4096];
+    unsigned char stack[4096];
 
     int code_size;
     int next_code;
@@ -855,97 +837,87 @@ typedef struct TIFF_LZW {
     int clear_code;
     int end_code;
 
-    minitiff_uint32 bit_buffer;
+    unsigned long bit_buffer;
     int bit_count;
 } TIFF_LZW;
 
 
-/*
-    TIFF LZW is MSB-first.
-
-    This is different from the LSB-first packing used by GIF LZW.
-*/
 static int tiff_lzw_get_code(TIFF_LZW *lzw,
-                             const minitiff_uint8 *src,
+                             const unsigned char *src,
                              size_t src_size,
-                             size_t *pos)
+                             size_t *position)
 {
     while (lzw->bit_count < lzw->code_size) {
-        if (*pos >= src_size)
+        if (*position >= src_size)
             return -1;
 
         lzw->bit_buffer =
-            (lzw->bit_buffer << 8) | src[(*pos)++];
+            (lzw->bit_buffer << 8) |
+            (unsigned long)src[(*position)++];
 
         lzw->bit_count += 8;
     }
 
     {
-        minitiff_uint32 mask =
-            (1u << lzw->code_size) - 1u;
+        unsigned long mask;
+        int shift;
+        int code;
 
-        int shift =
-            lzw->bit_count - lzw->code_size;
+        mask = (1UL << lzw->code_size) - 1UL;
+        shift = lzw->bit_count - lzw->code_size;
 
-        int code =
-            (int)((lzw->bit_buffer >> shift) & mask);
+        code = (int)((lzw->bit_buffer >> shift) & mask);
 
         lzw->bit_count -= lzw->code_size;
 
-        if (lzw->bit_count == 0) {
-            lzw->bit_buffer = 0;
-        }
-        else {
+        if (lzw->bit_count != 0)
             lzw->bit_buffer &=
-                (1u << lzw->bit_count) - 1u;
-        }
+                (1UL << lzw->bit_count) - 1UL;
+        else
+            lzw->bit_buffer = 0;
 
         return code;
     }
 }
 
 
-static int tiff_lzw_decode(const minitiff_uint8 *src,
+static int tiff_lzw_decode(const unsigned char *src,
                            size_t src_size,
-                           minitiff_uint8 *dst,
+                           unsigned char *dst,
                            size_t dst_size)
 {
     TIFF_LZW lzw;
-
-    size_t pos = 0;
-    size_t out = 0;
-
-    int first_char = -1;
+    size_t position;
+    size_t output;
+    int first_char;
 
     memset(&lzw, 0, sizeof(lzw));
 
-    lzw.clear_code = 256;
-    lzw.end_code   = 257;
-
     lzw.code_size = 9;
     lzw.next_code = 258;
-    lzw.old_code  = -1;
+    lzw.old_code = -1;
+    lzw.clear_code = 256;
+    lzw.end_code = 257;
 
-    while (out < dst_size) {
+    position = 0;
+    output = 0;
+    first_char = -1;
+
+    while (output < dst_size) {
         int code;
 
         code = tiff_lzw_get_code(&lzw,
                                  src,
                                  src_size,
-                                 &pos);
+                                 &position);
 
         if (code < 0)
             return 0;
 
-        /*
-            CLEAR resets the dictionary.
-        */
         if (code == lzw.clear_code) {
             lzw.code_size = 9;
             lzw.next_code = 258;
             lzw.old_code = -1;
-            lzw.bit_buffer = 0;
-            lzw.bit_count = 0;
             first_char = -1;
             continue;
         }
@@ -953,163 +925,346 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
         if (code == lzw.end_code)
             break;
 
-        /*
-            First code after CLEAR.
-        */
+        /* First code after CLEAR. */
         if (lzw.old_code < 0) {
-            if (code >= 256)
+            if (code < 0 || code > 255)
                 return 0;
 
-            if (out >= dst_size)
+            if (output >= dst_size)
                 return 0;
 
-            dst[out++] = (minitiff_uint8)code;
+            dst[output++] = (unsigned char)code;
 
             first_char = code;
             lzw.old_code = code;
-
             continue;
         }
 
         {
-            int cur = code;
-            int stack_count = 0;
+            int current;
+            int stack_count;
+
+            current = code;
+            stack_count = 0;
 
             /*
-                Special KwKwK case.
+                KwKwK case: the requested code is the next dictionary
+                entry that has not quite been created yet.
             */
             if (code == lzw.next_code) {
-                if (first_char < 0)
-                    return 0;
-
-                if (stack_count >= 4096)
-                    return 0;
-
-                lzw.stack[stack_count++] =
-                    (minitiff_uint8)first_char;
-
-                cur = lzw.old_code;
-            }
-            else if (code > lzw.next_code) {
-                return 0;
-            }
-
-            /*
-                Walk dictionary backwards.
-            */
-            while (cur >= 256) {
-                if (cur < 258 || cur >= 4096)
-                    return 0;
-
-                if (stack_count >= 4096)
+                if (first_char < 0 ||
+                    stack_count >= 4096)
                     return 0;
 
                 lzw.stack[stack_count++] =
-                    lzw.suffix[cur];
+                    (unsigned char)first_char;
 
-                cur = lzw.prefix[cur];
+                current = lzw.old_code;
+            }
+            else if (code > lzw.next_code ||
+                     code >= 4096) {
+                return 0;
             }
 
-            if (cur < 0 || cur > 255)
+            while (current >= 256) {
+                if (current < 258 ||
+                    current >= 4096 ||
+                    stack_count >= 4096)
+                    return 0;
+
+                lzw.stack[stack_count++] =
+                    lzw.suffix[current];
+
+                current = lzw.prefix[current];
+            }
+
+            if (current < 0 ||
+                current > 255 ||
+                stack_count >= 4096)
                 return 0;
 
-            first_char = cur;
-
-            if (stack_count >= 4096)
-                return 0;
+            first_char = current;
 
             lzw.stack[stack_count++] =
-                (minitiff_uint8)cur;
+                (unsigned char)current;
 
-            /*
-                Emit string in forward order.
-            */
-            while (stack_count > 0) {
-                if (out >= dst_size)
+            while (stack_count != 0) {
+                if (output >= dst_size)
                     return 0;
 
-                dst[out++] =
+                dst[output++] =
                     lzw.stack[--stack_count];
             }
 
             /*
-                Add:
-                    old_string + first_character
-                to dictionary.
+                Add old_string + first_char to the dictionary.
             */
             if (lzw.next_code < 4096) {
                 lzw.prefix[lzw.next_code] =
                     lzw.old_code;
 
                 lzw.suffix[lzw.next_code] =
-                    (minitiff_uint8)first_char;
+                    (unsigned char)first_char;
 
                 ++lzw.next_code;
 
-                /*
-                    TIFF uses "early change".
-
-                    When the next free code reaches
-                    2^code_size - 1, increase the code width.
-                */
+                /* TIFF uses early-change. */
                 if (lzw.next_code ==
                     ((1 << lzw.code_size) - 1) &&
-                    lzw.code_size < 12) {
-
+                    lzw.code_size < 12)
                     ++lzw.code_size;
-                }
             }
 
             lzw.old_code = code;
         }
     }
 
-    return out == dst_size;
+    return output == dst_size;
 }
 
 
 /* ------------------------------------------------------------------------- */
-/* Strip decompression                                                       */
+/* Optional Deflate decoder                                                  */
 /* ------------------------------------------------------------------------- */
 
-static int tiff_decode_strip(const TIFF_Context *t,
-                             const TIFF_Page *page,
-                             minitiff_uint32 strip,
-                             minitiff_uint8 *dst,
-                             size_t dst_size)
+#ifdef MINITIFF_USE_ZLIB
+
+static int tiff_zlib_decode(const unsigned char *src,
+                            size_t src_size,
+                            unsigned char *dst,
+                            size_t dst_size)
 {
-    minitiff_uint32 offset;
-    minitiff_uint32 count;
+    z_stream stream;
+    int result;
+    unsigned long source_length;
+    unsigned long destination_length;
+
+    if (src_size > (size_t)ULONG_MAX ||
+        dst_size > (size_t)ULONG_MAX)
+        return 0;
+
+    memset(&stream, 0, sizeof(stream));
+
+    source_length = (unsigned long)src_size;
+    destination_length = (unsigned long)dst_size;
+
+    stream.next_in = (Bytef *)src;
+    stream.avail_in = (uInt)source_length;
+    stream.next_out = (Bytef *)dst;
+    stream.avail_out = (uInt)destination_length;
+
+    /*
+        TIFF Compression 8 is Deflate. Compression 32946 is the old
+        Adobe Deflate identifier. Both normally contain a zlib stream.
+    */
+    result = inflateInit(&stream);
+    if (result != Z_OK)
+        return 0;
+
+    result = inflate(&stream, Z_FINISH);
+
+    inflateEnd(&stream);
+
+    return result == Z_STREAM_END &&
+           stream.total_out == destination_length;
+}
+
+#endif /* MINITIFF_USE_ZLIB */
+
+
+/* ------------------------------------------------------------------------- */
+/* JPEG-in-TIFF decoder                                                      */
+/* ------------------------------------------------------------------------- */
+
+#ifdef MINITIFF_USE_STB_IMAGE
+
+static int tiff_jpeg_decode(const unsigned char *src,
+                            size_t src_size,
+                            unsigned char *dst,
+                            size_t dst_size,
+                            unsigned long expected_width,
+                            unsigned long expected_height,
+                            unsigned short expected_samples)
+{
+    int width;
+    int height;
+    int channels;
+    unsigned char *decoded;
+    size_t decoded_size;
+    size_t i;
+
+    if (src_size > (size_t)INT_MAX)
+        return 0;
+
+    decoded = stbi_load_from_memory(
+        src,
+        (int)src_size,
+        &width,
+        &height,
+        &channels,
+        0);
+
+    if (!decoded)
+        return 0;
+
+    if ((unsigned long)width != expected_width ||
+        (unsigned long)height != expected_height) {
+        stbi_image_free(decoded);
+        return 0;
+    }
+
+    /*
+        TIFF JPEG strips are commonly RGB or grayscale. Convert the result
+        to the exact number of bytes requested by the TIFF page.
+    */
+    if (channels != 1 && channels != 2 &&
+        channels != 3 && channels != 4) {
+        stbi_image_free(decoded);
+        return 0;
+    }
+
+    if (!tiff_mul_size((size_t)width,
+                       (size_t)height,
+                       &decoded_size) ||
+        !tiff_mul_size(decoded_size,
+                       (size_t)expected_samples,
+                       &decoded_size) ||
+        decoded_size != dst_size) {
+        stbi_image_free(decoded);
+        return 0;
+    }
+
+    for (i = 0; i < (size_t)width * (size_t)height; ++i) {
+        if (expected_samples == 1) {
+            if (channels == 1 || channels == 2)
+                dst[i] = decoded[i * (size_t)channels];
+            else {
+                /* Convert RGB JPEG to grayscale using a simple average. */
+                unsigned int r = decoded[i * (size_t)channels + 0];
+                unsigned int g = decoded[i * (size_t)channels + 1];
+                unsigned int b = decoded[i * (size_t)channels + 2];
+                dst[i] = (unsigned char)((r + g + b) / 3);
+            }
+        }
+        else if (expected_samples == 3) {
+            if (channels == 1 || channels == 2) {
+                unsigned char v = decoded[i * (size_t)channels];
+                dst[i * 3 + 0] = v;
+                dst[i * 3 + 1] = v;
+                dst[i * 3 + 2] = v;
+            }
+            else {
+                dst[i * 3 + 0] = decoded[i * (size_t)channels + 0];
+                dst[i * 3 + 1] = decoded[i * (size_t)channels + 1];
+                dst[i * 3 + 2] = decoded[i * (size_t)channels + 2];
+            }
+        }
+        else if (expected_samples == 4) {
+            if (channels == 1 || channels == 2) {
+                unsigned char v = decoded[i * (size_t)channels];
+                dst[i * 4 + 0] = v;
+                dst[i * 4 + 1] = v;
+                dst[i * 4 + 2] = v;
+                dst[i * 4 + 3] =
+                    channels == 2 ? decoded[i * 2 + 1] : 255;
+            }
+            else {
+                dst[i * 4 + 0] = decoded[i * (size_t)channels + 0];
+                dst[i * 4 + 1] = decoded[i * (size_t)channels + 1];
+                dst[i * 4 + 2] = decoded[i * (size_t)channels + 2];
+                dst[i * 4 + 3] =
+                    channels == 4 ? decoded[i * 4 + 3] : 255;
+            }
+        }
+        else {
+            stbi_image_free(decoded);
+            return 0;
+        }
+    }
+
+    stbi_image_free(decoded);
+    return 1;
+}
+
+#endif /* MINITIFF_USE_STB_IMAGE */
+
+
+/* ------------------------------------------------------------------------- */
+/* Strip decoding                                                            */
+/* ------------------------------------------------------------------------- */
+
+static int tiff_decode_strip(const TIFF_Context *tiff,
+                             const TIFF_Page *page,
+                             unsigned long strip,
+                             unsigned char *destination,
+                             size_t destination_size,
+                             unsigned long strip_width,
+                             unsigned long strip_height)
+{
+    unsigned long offset;
+    unsigned long byte_count;
 
     if (strip >= page->strip_count)
         return 0;
 
     offset = page->strip_offsets[strip];
-    count = page->strip_byte_counts[strip];
+    byte_count = page->strip_byte_counts[strip];
 
-    if (!tiff_range_ok(t, offset, count))
+    if (!tiff_range_ok(tiff, offset, (size_t)byte_count))
         return 0;
 
     switch (page->compression) {
-
     case 1:
-        if ((size_t)count != dst_size)
+        if ((size_t)byte_count != destination_size)
             return 0;
 
-        memcpy(dst, t->data + offset, dst_size);
+        memcpy(destination,
+               tiff->data + offset,
+               destination_size);
         return 1;
 
-    case 32773:
-        return tiff_packbits_decode(t->data + offset,
-                                     count,
-                                     dst,
-                                     dst_size);
-
     case 5:
-        return tiff_lzw_decode(t->data + offset,
-                               count,
-                               dst,
-                               dst_size);
+        return tiff_lzw_decode(
+            tiff->data + offset,
+            (size_t)byte_count,
+            destination,
+            destination_size);
+
+    case 32773:
+        return tiff_packbits_decode(
+            tiff->data + offset,
+            (size_t)byte_count,
+            destination,
+            destination_size);
+
+#ifdef MINITIFF_USE_ZLIB
+    case 8:
+    case 32946:
+        return tiff_zlib_decode(
+            tiff->data + offset,
+            (size_t)byte_count,
+            destination,
+            destination_size);
+#else
+    case 8:
+    case 32946:
+        return 0;
+#endif
+
+#ifdef MINITIFF_USE_STB_IMAGE
+    case 6:
+        return tiff_jpeg_decode(
+            tiff->data + offset,
+            (size_t)byte_count,
+            destination,
+            destination_size,
+            strip_width,
+            strip_height,
+            page->samples_per_pixel);
+#else
+    case 6:
+        return 0;
+#endif
 
     default:
         return 0;
@@ -1121,162 +1276,228 @@ static int tiff_decode_strip(const TIFF_Context *t,
 /* Predictor                                                                 */
 /* ------------------------------------------------------------------------- */
 
-static void tiff_predictor_horizontal(minitiff_uint8 *data,
-                                      minitiff_uint32 width,
-                                      minitiff_uint32 rows,
-                                      minitiff_uint32 channels)
+static void tiff_predictor_horizontal(unsigned char *data,
+                                      unsigned long width,
+                                      unsigned long rows,
+                                      unsigned long samples_per_pixel)
 {
-    minitiff_uint32 y;
+    unsigned long y;
+    size_t stride;
+
+    stride = (size_t)width *
+             (size_t)samples_per_pixel;
 
     for (y = 0; y < rows; ++y) {
-        minitiff_uint8 *row =
-            data + (size_t)y * width * channels;
+        unsigned char *row;
+        size_t x;
 
-        minitiff_uint32 x;
+        row = data + (size_t)y * stride;
 
-        for (x = channels; x < width * channels; ++x)
-            row[x] = (minitiff_uint8)(row[x] + row[x - channels]);
+        for (x = (size_t)samples_per_pixel;
+             x < stride;
+             ++x) {
+            row[x] = (unsigned char)(
+                row[x] + row[x - samples_per_pixel]);
+        }
     }
 }
 
 
 /* ------------------------------------------------------------------------- */
-/* Pixel conversion                                                          */
+/* Small-bit-depth sample extraction                                        */
 /* ------------------------------------------------------------------------- */
 
-static minitiff_uint8 tiff_palette_value(const TIFF_Page *p,
-                                  minitiff_uint32 index,
-                                  int channel)
+static unsigned long tiff_get_sample(const unsigned char *row,
+                                     size_t bit_position,
+                                     unsigned short bits)
 {
-    minitiff_uint32 n;
+    unsigned char value;
+    unsigned int shift;
 
-    if (!p->color_map)
-        return 0;
+    if (bits == 8)
+        return row[bit_position >> 3];
 
-    /*
-        ColorMap consists of:
-            Red[n]
-            Green[n]
-            Blue[n]
+    value = row[bit_position >> 3];
 
-        TIFF palette entries are 16-bit.
-    */
-    n = p->color_map_count / 3;
-
-    if (index >= n)
-        return 0;
-
-    {
-        minitiff_uint16 v =
-            p->color_map[channel * n + index];
-
-        /*
-            TIFF palette values are normally 0..65535.
-            Convert to 8 bit by taking the high byte.
-        */
-        return (minitiff_uint8)(v >> 8);
+    if (bits == 4) {
+        shift = (unsigned int)(4 -
+            ((bit_position & 7) >> 1) * 4);
+        return (unsigned long)((value >> shift) & 15);
     }
+
+    if (bits == 2) {
+        shift = (unsigned int)(6 -
+            ((bit_position & 7) >> 1) * 2);
+        return (unsigned long)((value >> shift) & 3);
+    }
+
+    /* bits == 1 */
+    shift = (unsigned int)(7 - (bit_position & 7));
+    return (unsigned long)((value >> shift) & 1);
 }
 
 
-static void tiff_put_pixel(TIFF_Image *img,
-                           minitiff_uint32 x,
-                           minitiff_uint32 y,
-                           minitiff_uint8 r,
-                           minitiff_uint8 g,
-                           minitiff_uint8 b,
-                           minitiff_uint8 a)
+static unsigned char tiff_scale_sample(unsigned long value,
+                                        unsigned short bits)
 {
-    size_t index =
-        ((size_t)y * img->width + x) * 4;
+    unsigned long maximum;
+    unsigned long scaled;
 
-    img->pixels[index + 0] = r;
-    img->pixels[index + 1] = g;
-    img->pixels[index + 2] = b;
-    img->pixels[index + 3] = a;
+    if (bits == 8)
+        return (unsigned char)value;
+
+    maximum = (1UL << bits) - 1UL;
+    scaled = (value * 255UL + maximum / 2UL) / maximum;
+
+    return (unsigned char)scaled;
 }
 
 
-static int tiff_convert_pixels(const TIFF_Page *p,
-                               const minitiff_uint8 *raw,
-                               TIFF_Image *img)
+/* ------------------------------------------------------------------------- */
+/* Palette lookup                                                            */
+/* ------------------------------------------------------------------------- */
+
+static unsigned char tiff_palette_value(const TIFF_Page *page,
+                                        unsigned long index,
+                                        int channel)
 {
-    minitiff_uint32 x, y;
-    minitiff_uint32 channels = p->samples_per_pixel;
+    unsigned long entries;
+    unsigned short value;
 
-    for (y = 0; y < p->height; ++y) {
-        const minitiff_uint8 *row =
-            raw + (size_t)y * p->width * channels;
+    if (!page->color_map)
+        return 0;
 
-        for (x = 0; x < p->width; ++x) {
-            const minitiff_uint8 *s =
-                row + (size_t)x * channels;
+    entries = page->color_map_count / 3UL;
 
-            minitiff_uint8 r, g, b, a;
+    if (entries == 0 || index >= entries)
+        return 0;
 
-            switch (p->photometric) {
+    value = page->color_map[
+        (unsigned long)channel * entries + index];
 
-            case 0:
-                /*
-                    WhiteIsZero grayscale.
-                */
-                r = g = b = (minitiff_uint8)(255 - s[0]);
-                a = 255;
+    /* TIFF ColorMap entries are normally 16-bit 0..65535. */
+    return (unsigned char)(value >> 8);
+}
 
-                if (channels >= 2)
-                    a = s[1];
 
-                break;
+/* ------------------------------------------------------------------------- */
+/* Convert raw samples to RGBA8                                              */
+/* ------------------------------------------------------------------------- */
 
-            case 1:
-                /*
-                    BlackIsZero grayscale.
-                */
-                r = g = b = s[0];
-                a = 255;
+static int tiff_convert_pixels(const TIFF_Page *page,
+                               const unsigned char *raw,
+                               TIFF_Image *image)
+{
+    unsigned long x;
+    unsigned long y;
+    unsigned short bits;
+    size_t row_bits;
+    size_t row_bytes;
 
-                if (channels >= 2)
-                    a = s[1];
+    bits = page->bits_per_sample[0];
 
-                break;
+    if (!tiff_mul_size((size_t)page->width,
+                       (size_t)page->samples_per_pixel,
+                       &row_bits) ||
+        !tiff_mul_size(row_bits,
+                       (size_t)bits,
+                       &row_bits))
+        return 0;
 
-            case 2:
-                /*
-                    RGB.
-                */
-                if (channels < 3)
-                    return 0;
+    row_bytes = (row_bits + 7) / 8;
 
-                r = s[0];
-                g = s[1];
-                b = s[2];
+    for (y = 0; y < page->height; ++y) {
+        const unsigned char *row;
 
-                a = 255;
+        row = raw + (size_t)y * row_bytes;
 
-                if (channels >= 4)
-                    a = s[3];
+        for (x = 0; x < page->width; ++x) {
+            unsigned char r;
+            unsigned char g;
+            unsigned char b;
+            unsigned char a;
+            size_t base_bit;
+            size_t output_offset;
 
-                break;
+            r = 0;
+            g = 0;
+            b = 0;
+            a = 255;
 
-            case 3:
-                /*
-                    Palette.
-                */
-                r = tiff_palette_value(p, s[0], 0);
-                g = tiff_palette_value(p, s[0], 1);
-                b = tiff_palette_value(p, s[0], 2);
-                a = 255;
+            base_bit = (size_t)x *
+                       (size_t)page->samples_per_pixel *
+                       (size_t)bits;
 
-                if (channels >= 2)
-                    a = s[1];
+            if (page->photometric == 0 ||
+                page->photometric == 1) {
+                unsigned long value;
 
-                break;
+                value = tiff_get_sample(row,
+                                        base_bit,
+                                        bits);
 
-            default:
+                if (page->photometric == 0)
+                    value = ((1UL << bits) - 1UL) - value;
+
+                r = tiff_scale_sample(value, bits);
+                g = r;
+                b = r;
+
+                if (page->samples_per_pixel >= 2) {
+                    value = tiff_get_sample(
+                        row,
+                        base_bit + bits,
+                        bits);
+
+                    a = tiff_scale_sample(value, bits);
+                }
+            }
+            else if (page->photometric == 2) {
+                /* RGB/RGBA is byte-oriented in this decoder. */
+                const unsigned char *pixel;
+
+                pixel = row + (size_t)x *
+                        (size_t)page->samples_per_pixel;
+
+                r = pixel[0];
+                g = pixel[1];
+                b = pixel[2];
+
+                if (page->samples_per_pixel >= 4)
+                    a = pixel[3];
+            }
+            else if (page->photometric == 3) {
+                unsigned long index;
+
+                index = tiff_get_sample(row,
+                                        base_bit,
+                                        bits);
+
+                r = tiff_palette_value(page, index, 0);
+                g = tiff_palette_value(page, index, 1);
+                b = tiff_palette_value(page, index, 2);
+
+                if (page->samples_per_pixel >= 2) {
+                    index = tiff_get_sample(
+                        row,
+                        base_bit + bits,
+                        bits);
+
+                    a = tiff_scale_sample(index, bits);
+                }
+            }
+            else {
                 return 0;
             }
 
-            tiff_put_pixel(img, x, y, r, g, b, a);
+            output_offset =
+                ((size_t)y * (size_t)image->width +
+                 (size_t)x) * 4;
+
+            image->pixels[output_offset + 0] = r;
+            image->pixels[output_offset + 1] = g;
+            image->pixels[output_offset + 2] = b;
+            image->pixels[output_offset + 3] = a;
         }
     }
 
@@ -1285,154 +1506,211 @@ static int tiff_convert_pixels(const TIFF_Page *p,
 
 
 /* ------------------------------------------------------------------------- */
-/* Main image decoder                                                        */
+/* Decode one TIFF page                                                      */
 /* ------------------------------------------------------------------------- */
 
-static TIFF_Image *tiff_decode_page(const TIFF_Context *t,
-                                    const TIFF_Page *p)
+static TIFF_Image *tiff_decode_page(const TIFF_Context *tiff,
+                                    const TIFF_Page *page)
 {
-    TIFF_Image *img = NULL;
-
-    minitiff_uint8 *raw = NULL;
-
-    size_t bytes_per_row;
+    TIFF_Image *image;
+    unsigned char *raw;
+    size_t raw_row_size;
     size_t raw_size;
-
-    minitiff_uint32 y;
-    minitiff_uint32 strip;
-    minitiff_uint32 rows_per_strip;
-
-    if (!tiff_mul_size((size_t)p->width,
-                       (size_t)p->samples_per_pixel,
-                       &bytes_per_row))
-        return NULL;
-
-    if (!tiff_mul_size(bytes_per_row,
-                       (size_t)p->height,
-                       &raw_size))
-        return NULL;
+    size_t pixel_count;
+    size_t pixel_size;
+    unsigned long y;
+    unsigned long strip;
 
     /*
-        Limit allocations to SIZE_MAX and also make sure width*height
-        can be represented in a normal allocation.
+        Calculate the decoded bytes in one scanline.
+
+        RGB is always 8-bit in this implementation.
+        Grayscale/palette may be packed at 1/2/4/8 bits.
     */
-    if (raw_size == 0)
+    if (page->photometric == 2) {
+        if (page->samples_per_pixel != 3 &&
+            page->samples_per_pixel != 4)
+            return NULL;
+
+        if (!tiff_mul_size(
+                (size_t)page->width,
+                (size_t)page->samples_per_pixel,
+                &raw_row_size))
+            return NULL;
+    }
+    else {
+        size_t row_bits;
+
+        if (!tiff_mul_size(
+                (size_t)page->width,
+                (size_t)page->samples_per_pixel,
+                &row_bits))
+            return NULL;
+
+        if (!tiff_mul_size(
+                row_bits,
+                (size_t)page->bits_per_sample[0],
+                &row_bits))
+            return NULL;
+
+        raw_row_size = (row_bits + 7) / 8;
+    }
+
+    if (!tiff_mul_size(raw_row_size,
+                       (size_t)page->height,
+                       &raw_size) ||
+        raw_size == 0)
         return NULL;
 
-    raw = (minitiff_uint8 *)malloc(raw_size);
+    raw = (unsigned char *)malloc(raw_size);
     if (!raw)
         return NULL;
 
-    /*
-        TIFF does not require RowsPerStrip to be retained after parsing
-        if we calculate the expected strip size from the total image
-        and strip count.
-
-        This works for normal sequential strips, but TIFF technically
-        permits arbitrary strip organization. For a small decoder,
-        use an even distribution based on strip count.
-    */
-    rows_per_strip = p->rows_per_strip;
-
-    if (rows_per_strip == 0)
-        return NULL;
-
-    /*
-        Decode each strip.
-    */
+    /* Decode strips in their normal top-to-bottom order. */
     y = 0;
 
     for (strip = 0;
-         strip < p->strip_count && y < p->height;
+         strip < page->strip_count &&
+         y < page->height;
          ++strip) {
-
-        minitiff_uint32 rows;
+        unsigned long rows;
         size_t strip_size;
-        minitiff_uint8 *dest;
+        unsigned char *destination;
 
-        rows = p->height - y;
+        rows = page->height - y;
+        if (rows > page->rows_per_strip)
+            rows = page->rows_per_strip;
 
-        if (rows > rows_per_strip)
-            rows = rows_per_strip;
-
-        if (!tiff_mul_size(bytes_per_row,
-                           rows,
+        if (!tiff_mul_size(raw_row_size,
+                           (size_t)rows,
                            &strip_size)) {
             free(raw);
             return NULL;
         }
 
-        dest = raw + (size_t)y * bytes_per_row;
+        destination = raw +
+            (size_t)y * raw_row_size;
 
-        if (!tiff_decode_strip(t,
-                               p,
-                               strip,
-                               dest,
-                               strip_size)) {
+        if (!tiff_decode_strip(
+                tiff,
+                page,
+                strip,
+                destination,
+                strip_size,
+                page->width,
+                rows)) {
             free(raw);
             return NULL;
+        }
+
+        if (page->predictor == 2) {
+            /* Predictor 2 is implemented for byte-oriented samples. */
+            if (page->bits_per_sample[0] != 8) {
+                free(raw);
+                return NULL;
+            }
+
+            tiff_predictor_horizontal(
+                destination,
+                page->width,
+                rows,
+                page->samples_per_pixel);
         }
 
         y += rows;
     }
 
-    if (y != p->height) {
+    if (y != page->height) {
         free(raw);
         return NULL;
     }
 
-    if (p->predictor == 2) {
-        tiff_predictor_horizontal(raw,
-                                  p->width,
-                                  p->height,
-                                  p->samples_per_pixel);
-    }
-
-    img = (TIFF_Image *)calloc(1, sizeof(TIFF_Image));
-
-    if (!img) {
+    if (!tiff_mul_size((size_t)page->width,
+                       (size_t)page->height,
+                       &pixel_count) ||
+        !tiff_mul_size(pixel_count,
+                       4,
+                       &pixel_size)) {
         free(raw);
         return NULL;
     }
 
-    img->width = p->width;
-    img->height = p->height;
-    img->channels = 4;
-    img->bits_per_channel = 8;
-
-    {
-        size_t pixel_count;
-        size_t pixel_bytes;
-
-        if (!tiff_mul_size((size_t)p->width,
-                           (size_t)p->height,
-                           &pixel_count) ||
-            !tiff_mul_size(pixel_count,
-                           4,
-                           &pixel_bytes)) {
-            free(raw);
-            free(img);
-            return NULL;
-        }
-
-        img->pixels = (minitiff_uint8 *)malloc(pixel_bytes);
-
-        if (!img->pixels) {
-            free(raw);
-            free(img);
-            return NULL;
-        }
+    image = (TIFF_Image *)calloc(1, sizeof(*image));
+    if (!image) {
+        free(raw);
+        return NULL;
     }
 
-    if (!tiff_convert_pixels(p, raw, img)) {
+    image->width = page->width;
+    image->height = page->height;
+    image->channels = 4;
+    image->bits_per_channel = 8;
+
+    image->pixels = (unsigned char *)malloc(pixel_size);
+    if (!image->pixels) {
         free(raw);
-        tiff_free(img);
+        tiff_free(image);
+        return NULL;
+    }
+
+    if (!tiff_convert_pixels(page, raw, image)) {
+        free(raw);
+        tiff_free(image);
         return NULL;
     }
 
     free(raw);
+    return image;
+}
 
-    return img;
+
+/* ------------------------------------------------------------------------- */
+/* Find an IFD/page                                                          */
+/* ------------------------------------------------------------------------- */
+
+static int tiff_find_ifd(const TIFF_Context *tiff,
+                         unsigned page_index,
+                         unsigned long *result)
+{
+    unsigned long offset;
+    unsigned page;
+
+    offset = tiff->first_ifd;
+
+    for (page = 0; page < page_index; ++page) {
+        unsigned short count;
+        size_t entries_size;
+        size_t total_size;
+
+        if (!tiff_range_ok(tiff, offset, 2))
+            return 0;
+
+        count = tiff_u16(tiff,
+                         tiff->data + offset);
+
+        if (!tiff_mul_size((size_t)count,
+                           12,
+                           &entries_size))
+            return 0;
+
+        if (!tiff_add_size(entries_size,
+                           6,
+                           &total_size))
+            return 0;
+
+        if (!tiff_range_ok(tiff, offset, total_size))
+            return 0;
+
+        offset = tiff_u32(
+            tiff,
+            tiff->data + offset + 2 + entries_size);
+
+        if (offset == 0)
+            return 0;
+    }
+
+    *result = offset;
+    return 1;
 }
 
 
@@ -1444,61 +1722,60 @@ TIFF_Image *tiff_load(const void *data,
                       size_t size,
                       unsigned page_index)
 {
-    TIFF_Context t;
-    minitiff_uint16 version;
-    minitiff_uint32 ifd;
+    TIFF_Context tiff;
     TIFF_Page page;
-    TIFF_Image *result;
+    unsigned long ifd;
+    TIFF_Image *image;
+
+    memset(&tiff, 0, sizeof(tiff));
+    memset(&page, 0, sizeof(page));
 
     if (!data || size < 8)
         return NULL;
 
-    memset(&t, 0, sizeof(t));
+    tiff.data = (const unsigned char *)data;
+    tiff.size = size;
 
-    t.data = (const minitiff_uint8 *)data;
-    t.size = size;
-
-    /*
-        Byte order.
-    */
-    if (t.data[0] == 'I' && t.data[1] == 'I') {
-        t.little_endian = 1;
+    /* Byte order. */
+    if (tiff.data[0] == 'I' &&
+        tiff.data[1] == 'I') {
+        tiff.little_endian = 1;
     }
-    else if (t.data[0] == 'M' && t.data[1] == 'M') {
-        t.little_endian = 0;
+    else if (tiff.data[0] == 'M' &&
+             tiff.data[1] == 'M') {
+        tiff.little_endian = 0;
     }
     else {
         return NULL;
     }
 
-    /*
-        TIFF magic number = 42.
-    */
-    version = tiff_u16(&t, t.data + 2);
-
-    if (version != 42)
+    /* Classic TIFF magic number. */
+    if (tiff_u16(&tiff, tiff.data + 2) != 42)
         return NULL;
 
-    t.ifd_offset = tiff_u32(&t, t.data + 4);
+    tiff.first_ifd = tiff_u32(&tiff,
+                              tiff.data + 4);
 
-    if (t.ifd_offset == 0)
+    if (tiff.first_ifd == 0)
         return NULL;
 
-    if (!tiff_find_ifd(&t,
+    if (!tiff_find_ifd(&tiff,
                        page_index,
                        &ifd))
         return NULL;
 
-    if (!tiff_parse_page(&t,
-                         ifd,
-                         &page))
+    if (!tiff_parse_ifd(&tiff,
+                        ifd,
+                        &page)) {
+        tiff_page_free(&page);
         return NULL;
+    }
 
-    result = tiff_decode_page(&t, &page);
+    image = tiff_decode_page(&tiff, &page);
 
     tiff_page_free(&page);
 
-    return result;
+    return image;
 }
 
 
@@ -1509,58 +1786,55 @@ TIFF_Image *tiff_load(const void *data,
 TIFF_Image *tiff_load_file(const char *filename,
                            unsigned page_index)
 {
-    FILE *f;
+    FILE *file;
     long file_size_long;
     size_t file_size;
-    minitiff_uint8 *data;
+    unsigned char *data;
     TIFF_Image *image;
 
     if (!filename)
         return NULL;
 
-    f = fopen(filename, "rb");
-
-    if (!f)
+    file = fopen(filename, "rb");
+    if (!file)
         return NULL;
 
-    if (fseek(f, 0, SEEK_END) != 0) {
-        fclose(f);
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
         return NULL;
     }
 
-    file_size_long = ftell(f);
-
+    file_size_long = ftell(file);
     if (file_size_long < 0) {
-        fclose(f);
+        fclose(file);
         return NULL;
     }
 
     file_size = (size_t)file_size_long;
 
     if (file_size == 0) {
-        fclose(f);
+        fclose(file);
         return NULL;
     }
 
-    if (fseek(f, 0, SEEK_SET) != 0) {
-        fclose(f);
+    if (fseek(file, 0, SEEK_SET) != 0) {
+        fclose(file);
         return NULL;
     }
 
-    data = (minitiff_uint8 *)malloc(file_size);
-
+    data = (unsigned char *)malloc(file_size);
     if (!data) {
-        fclose(f);
+        fclose(file);
         return NULL;
     }
 
-    if (fread(data, 1, file_size, f) != file_size) {
+    if (fread(data, 1, file_size, file) != file_size) {
         free(data);
-        fclose(f);
+        fclose(file);
         return NULL;
     }
 
-    fclose(f);
+    fclose(file);
 
     image = tiff_load(data,
                       file_size,
@@ -1594,35 +1868,36 @@ void tiff_free(TIFF_Image *image)
 
 int main(int argc, char **argv)
 {
-    TIFF_Image *img;
+    TIFF_Image *image;
+    unsigned page;
 
     if (argc < 2) {
         fprintf(stderr,
                 "usage: %s file.tif [page]\n",
                 argv[0]);
-        return 1;
+        return 2;
     }
 
-    img = tiff_load_file(argv[1],
-                         argc >= 3 ?
-                         (unsigned)atoi(argv[2]) :
-                         0);
+    page = 0;
+    if (argc >= 3)
+        page = (unsigned)strtoul(argv[2], NULL, 10);
 
-    if (!img) {
+    image = tiff_load_file(argv[1], page);
+
+    if (!image) {
         fprintf(stderr, "TIFF decode failed\n");
         return 1;
     }
 
-    printf("width  = %u\n", img->width);
-    printf("height = %u\n", img->height);
-    printf("format = RGBA8\n");
+    printf("%lu x %lu RGBA8\n",
+           image->width,
+           image->height);
 
-    tiff_free(img);
-
+    tiff_free(image);
     return 0;
 }
 
-#endif
+#endif /* TIFF_TEST */
 
 #endif /* MINITIFF_IMPLEMENTATION */
 
