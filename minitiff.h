@@ -856,6 +856,11 @@ typedef struct TIFF_LZW {
 } TIFF_LZW;
 
 
+/*
+    TIFF LZW is MSB-first.
+
+    This is different from the LSB-first packing used by GIF LZW.
+*/
 static int tiff_lzw_get_code(TIFF_LZW *lzw,
                              const minitiff_uint8 *src,
                              size_t src_size,
@@ -865,18 +870,31 @@ static int tiff_lzw_get_code(TIFF_LZW *lzw,
         if (*pos >= src_size)
             return -1;
 
-        lzw->bit_buffer |=
-            (minitiff_uint32)src[(*pos)++] << lzw->bit_count;
+        lzw->bit_buffer =
+            (lzw->bit_buffer << 8) | src[(*pos)++];
 
         lzw->bit_count += 8;
     }
 
     {
-        int code = (int)(lzw->bit_buffer &
-                         ((1u << lzw->code_size) - 1u));
+        minitiff_uint32 mask =
+            (1u << lzw->code_size) - 1u;
 
-        lzw->bit_buffer >>= lzw->code_size;
+        int shift =
+            lzw->bit_count - lzw->code_size;
+
+        int code =
+            (int)((lzw->bit_buffer >> shift) & mask);
+
         lzw->bit_count -= lzw->code_size;
+
+        if (lzw->bit_count == 0) {
+            lzw->bit_buffer = 0;
+        }
+        else {
+            lzw->bit_buffer &=
+                (1u << lzw->bit_count) - 1u;
+        }
 
         return code;
     }
@@ -889,6 +907,7 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
                            size_t dst_size)
 {
     TIFF_LZW lzw;
+
     size_t pos = 0;
     size_t out = 0;
 
@@ -897,11 +916,11 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
     memset(&lzw, 0, sizeof(lzw));
 
     lzw.clear_code = 256;
-    lzw.end_code = 257;
+    lzw.end_code   = 257;
 
     lzw.code_size = 9;
     lzw.next_code = 258;
-    lzw.old_code = -1;
+    lzw.old_code  = -1;
 
     while (out < dst_size) {
         int code;
@@ -914,10 +933,15 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
         if (code < 0)
             return 0;
 
+        /*
+            CLEAR resets the dictionary.
+        */
         if (code == lzw.clear_code) {
             lzw.code_size = 9;
             lzw.next_code = 258;
             lzw.old_code = -1;
+            lzw.bit_buffer = 0;
+            lzw.bit_count = 0;
             first_char = -1;
             continue;
         }
@@ -925,6 +949,9 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
         if (code == lzw.end_code)
             break;
 
+        /*
+            First code after CLEAR.
+        */
         if (lzw.old_code < 0) {
             if (code >= 256)
                 return 0;
@@ -936,6 +963,7 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
 
             first_char = code;
             lzw.old_code = code;
+
             continue;
         }
 
@@ -943,13 +971,10 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
             int cur = code;
             int stack_count = 0;
 
-            if (code >= lzw.next_code) {
-                /*
-                    KwKwK case.
-                */
-                if (code != lzw.next_code)
-                    return 0;
-
+            /*
+                Special KwKwK case.
+            */
+            if (code == lzw.next_code) {
                 if (first_char < 0)
                     return 0;
 
@@ -961,7 +986,13 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
 
                 cur = lzw.old_code;
             }
+            else if (code > lzw.next_code) {
+                return 0;
+            }
 
+            /*
+                Walk dictionary backwards.
+            */
             while (cur >= 256) {
                 if (cur < 258 || cur >= 4096)
                     return 0;
@@ -983,31 +1014,44 @@ static int tiff_lzw_decode(const minitiff_uint8 *src,
             if (stack_count >= 4096)
                 return 0;
 
-            lzw.stack[stack_count++] = (minitiff_uint8)cur;
+            lzw.stack[stack_count++] =
+                (minitiff_uint8)cur;
 
+            /*
+                Emit string in forward order.
+            */
             while (stack_count > 0) {
                 if (out >= dst_size)
                     return 0;
 
-                dst[out++] = lzw.stack[--stack_count];
+                dst[out++] =
+                    lzw.stack[--stack_count];
             }
 
             /*
-                Add old_string + first_char to dictionary.
+                Add:
+                    old_string + first_character
+                to dictionary.
             */
             if (lzw.next_code < 4096) {
-                lzw.prefix[lzw.next_code] = lzw.old_code;
-                lzw.suffix[lzw.next_code] = (minitiff_uint8)first_char;
+                lzw.prefix[lzw.next_code] =
+                    lzw.old_code;
+
+                lzw.suffix[lzw.next_code] =
+                    (minitiff_uint8)first_char;
+
                 ++lzw.next_code;
 
                 /*
-                    TIFF LZW uses an early-change convention.
-                    Increase code width when the next code reaches
-                    the current width limit.
+                    TIFF uses "early change".
+
+                    When the next free code reaches
+                    2^code_size - 1, increase the code width.
                 */
                 if (lzw.next_code ==
                     ((1 << lzw.code_size) - 1) &&
                     lzw.code_size < 12) {
+
                     ++lzw.code_size;
                 }
             }
