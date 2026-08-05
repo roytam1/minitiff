@@ -36,7 +36,7 @@
         This source does NOT define STB_IMAGE_IMPLEMENTATION. The application
         should do that once, in one C file, before including stb_image.h.
 
-      MINITIFF_USE_ZLIB
+      MINITIFF_USE_STB_ZLIB
 
         Use zlib for Deflate (Compression = 8 and 32946).
 
@@ -46,7 +46,7 @@
 
     Example:
 
-        TIFF_Image *image;
+        MiniTIFF_Image *image;
 
         image = tiff_load_file("picture.tif", 0);
         if (image) {
@@ -61,7 +61,7 @@
 
     Optional stb_image build:
 
-        cc -DMINITIFF_USE_STB_IMAGE -c MINITIFF_v2_c89.c
+        cc -DMINITIFF_USE_STB_IMAGE -c minitiff_v2_c89.c
 
     The application must arrange for stb_image's implementation to be built
     exactly once, for example:
@@ -69,9 +69,12 @@
         #define STB_IMAGE_IMPLEMENTATION
         #include "stb_image.h"
 
-    Optional zlib build:
+    Optional stb_image build:
 
-        cc -DMINITIFF_USE_ZLIB ... -lz
+        #define STB_IMAGE_IMPLEMENTATION
+        #define MINITIFF_USE_STB_IMAGE
+        #define MINITIFF_USE_STB_ZLIB
+        #include "minitiff_v2_c89.c"
 */
 #ifndef _MINITFF_H
 #define _MINITFF_H
@@ -81,16 +84,39 @@
 #include <string.h>
 #include <limits.h>
 
+/*
+    Optional stb_image support.
+
+    MINITIFF_USE_STB_IMAGE:
+        JPEG decoding through stb_image.
+
+    MINITIFF_USE_STB_ZLIB:
+        Deflate decoding through stb_image's internal zlib decoder.
+
+    MINITIFF_USE_STB_ZLIB requires MINITIFF_USE_STB_IMAGE.
+
+    IMPORTANT:
+        Because stb_image's zlib functions are static/private, when
+        MINITIFF_USE_STB_ZLIB is enabled this file must be compiled in
+        the same translation unit as the stb_image implementation.
+
+        A convenient arrangement is:
+
+            #define STB_IMAGE_IMPLEMENTATION
+            #define MINITIFF_USE_STB_IMAGE
+            #define MINITIFF_USE_STB_ZLIB
+            #include "minitiff_v2_c89.c"
+
+        Do not compile stb_image.c separately in that configuration.
+*/
 #ifdef MINITIFF_USE_STB_IMAGE
 #include "stb_image.h"
 #endif
 
-#ifdef MINITIFF_USE_ZLIB
-#include <zlib.h>
+#ifdef MINITIFF_USE_STB_ZLIB
+#ifndef MINITIFF_USE_STB_IMAGE
+#error MINITIFF_USE_STB_ZLIB requires MINITIFF_USE_STB_IMAGE
 #endif
-
-#ifndef SIZE_MAX
-#define SIZE_MAX ((size_t)(-1))
 #endif
 
 /* for test code */
@@ -102,17 +128,17 @@
 /* Public API                                                               */
 /* ------------------------------------------------------------------------- */
 
-typedef struct TIFF_Image {
+typedef struct MiniTIFF_Image {
     unsigned long width;
     unsigned long height;
     unsigned long channels;
     unsigned long bits_per_channel;
     unsigned char *pixels;
-} TIFF_Image;
+} MiniTIFF_Image;
 
-TIFF_Image *tiff_load(const void *data, size_t size, unsigned page_index);
-TIFF_Image *tiff_load_file(const char *filename, unsigned page_index);
-void tiff_free(TIFF_Image *image);
+MiniTIFF_Image *tiff_load(const void *data, size_t size, unsigned page_index);
+MiniTIFF_Image *tiff_load_file(const char *filename, unsigned page_index);
+void tiff_free(MiniTIFF_Image *image);
 
 
 #ifdef MINITIFF_IMPLEMENTATION
@@ -747,7 +773,7 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
 
     if (page->compression == 8 ||
         page->compression == 32946) {
-#ifndef MINITIFF_USE_ZLIB
+#ifndef MINITIFF_USE_STB_ZLIB
         return 0;
 #endif
     }
@@ -1027,49 +1053,46 @@ static int tiff_lzw_decode(const unsigned char *src,
 /* Optional Deflate decoder                                                  */
 /* ------------------------------------------------------------------------- */
 
-#ifdef MINITIFF_USE_ZLIB
+#ifdef MINITIFF_USE_STB_ZLIB
 
-static int tiff_zlib_decode(const unsigned char *src,
-                            size_t src_size,
-                            unsigned char *dst,
-                            size_t dst_size)
+/*
+    stb_image keeps its zlib decoder private.  This wrapper is intended
+    to be added to a copy of stb_image.h, after the internal zlib code.
+
+    The exact stb_image internal function is not part of its public API,
+    so this bridge may need adjustment when stb_image is upgraded.
+*/
+static int minitiff_stb_zlib_decode(const unsigned char *input,
+                                    int input_length,
+                                    unsigned char *output,
+                                    int output_length)
 {
-    z_stream stream;
     int result;
-    unsigned long source_length;
-    unsigned long destination_length;
 
-    if (src_size > (size_t)ULONG_MAX ||
-        dst_size > (size_t)ULONG_MAX)
-        return 0;
+    result = stbi__zlib_decode_buffer((char *)output,
+                                      output_length,
+                                      (const char *)input,
+                                      input_length);
 
-    memset(&stream, 0, sizeof(stream));
-
-    source_length = (unsigned long)src_size;
-    destination_length = (unsigned long)dst_size;
-
-    stream.next_in = (Bytef *)src;
-    stream.avail_in = (uInt)source_length;
-    stream.next_out = (Bytef *)dst;
-    stream.avail_out = (uInt)destination_length;
-
-    /*
-        TIFF Compression 8 is Deflate. Compression 32946 is the old
-        Adobe Deflate identifier. Both normally contain a zlib stream.
-    */
-    result = inflateInit(&stream);
-    if (result != Z_OK)
-        return 0;
-
-    result = inflate(&stream, Z_FINISH);
-
-    inflateEnd(&stream);
-
-    return result == Z_STREAM_END &&
-           stream.total_out == destination_length;
+    return result == output_length;
 }
 
-#endif /* MINITIFF_USE_ZLIB */
+static int minitiff_zlib_decode(const unsigned char *src,
+                                size_t src_size,
+                                unsigned char *dst,
+                                size_t dst_size)
+{
+    if (src_size > (size_t)INT_MAX ||
+        dst_size > (size_t)INT_MAX)
+        return 0;
+
+    return minitiff_stb_zlib_decode(src,
+                                    (int)src_size,
+                                    dst,
+                                    (int)dst_size);
+}
+
+#endif /* MINITIFF_USE_STB_ZLIB */
 
 
 /* ------------------------------------------------------------------------- */
@@ -1237,7 +1260,7 @@ static int tiff_decode_strip(const TIFF_Context *tiff,
             destination,
             destination_size);
 
-#ifdef MINITIFF_USE_ZLIB
+#ifdef MINITIFF_USE_STB_ZLIB
     case 8:
     case 32946:
         return tiff_zlib_decode(
@@ -1386,7 +1409,7 @@ static unsigned char tiff_palette_value(const TIFF_Page *page,
 
 static int tiff_convert_pixels(const TIFF_Page *page,
                                const unsigned char *raw,
-                               TIFF_Image *image)
+                               MiniTIFF_Image *image)
 {
     unsigned long x;
     unsigned long y;
@@ -1509,10 +1532,10 @@ static int tiff_convert_pixels(const TIFF_Page *page,
 /* Decode one TIFF page                                                      */
 /* ------------------------------------------------------------------------- */
 
-static TIFF_Image *tiff_decode_page(const TIFF_Context *tiff,
+static MiniTIFF_Image *tiff_decode_page(const TIFF_Context *tiff,
                                     const TIFF_Page *page)
 {
-    TIFF_Image *image;
+    MiniTIFF_Image *image;
     unsigned char *raw;
     size_t raw_row_size;
     size_t raw_size;
@@ -1635,7 +1658,7 @@ static TIFF_Image *tiff_decode_page(const TIFF_Context *tiff,
         return NULL;
     }
 
-    image = (TIFF_Image *)calloc(1, sizeof(*image));
+    image = (MiniTIFF_Image *)calloc(1, sizeof(*image));
     if (!image) {
         free(raw);
         return NULL;
@@ -1718,14 +1741,14 @@ static int tiff_find_ifd(const TIFF_Context *tiff,
 /* Public tiff_load                                                          */
 /* ------------------------------------------------------------------------- */
 
-TIFF_Image *tiff_load(const void *data,
+MiniTIFF_Image *tiff_load(const void *data,
                       size_t size,
                       unsigned page_index)
 {
     TIFF_Context tiff;
     TIFF_Page page;
     unsigned long ifd;
-    TIFF_Image *image;
+    MiniTIFF_Image *image;
 
     memset(&tiff, 0, sizeof(tiff));
     memset(&page, 0, sizeof(page));
@@ -1783,14 +1806,14 @@ TIFF_Image *tiff_load(const void *data,
 /* Public tiff_load_file                                                     */
 /* ------------------------------------------------------------------------- */
 
-TIFF_Image *tiff_load_file(const char *filename,
+MiniTIFF_Image *tiff_load_file(const char *filename,
                            unsigned page_index)
 {
     FILE *file;
     long file_size_long;
     size_t file_size;
     unsigned char *data;
-    TIFF_Image *image;
+    MiniTIFF_Image *image;
 
     if (!filename)
         return NULL;
@@ -1850,7 +1873,7 @@ TIFF_Image *tiff_load_file(const char *filename,
 /* Public tiff_free                                                          */
 /* ------------------------------------------------------------------------- */
 
-void tiff_free(TIFF_Image *image)
+void tiff_free(MiniTIFF_Image *image)
 {
     if (!image)
         return;
@@ -1868,7 +1891,7 @@ void tiff_free(TIFF_Image *image)
 
 int main(int argc, char **argv)
 {
-    TIFF_Image *image;
+    MiniTIFF_Image *image;
     unsigned page;
 
     if (argc < 2) {
