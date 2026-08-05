@@ -185,6 +185,11 @@ typedef struct TIFF_Page {
 
     unsigned short *color_map;
     unsigned long color_map_count;
+
+#ifdef MINITIFF_USE_STB_IMAGE
+    unsigned char *jpeg_tables;
+    size_t jpeg_tables_size;
+#endif
 } TIFF_Page;
 
 
@@ -469,6 +474,80 @@ static int tiff_load_u16_array(const TIFF_Context *tiff,
 }
 
 
+#ifdef MINITIFF_USE_STB_IMAGE
+
+/* ------------------------------------------------------------------------- */
+/* Copy raw entry bytes                                                      */
+/* ------------------------------------------------------------------------- */
+
+static int tiff_copy_entry_bytes(const TIFF_Context *tiff,
+                                 const TIFF_Entry *entry,
+                                 unsigned char **result,
+                                 size_t *result_size)
+{
+    size_t type_size;
+    size_t size;
+    unsigned char *buffer;
+
+    type_size = tiff_type_size(entry->type);
+    if (type_size == 0)
+        return 0;
+
+    if (!tiff_mul_size(type_size,
+                       (size_t)entry->count,
+                       &size))
+        return 0;
+
+    if (size == 0)
+        return 0;
+
+    buffer = (unsigned char *)malloc(size);
+    if (!buffer)
+        return 0;
+
+    if (size <= 4) {
+        unsigned char raw[4];
+        unsigned long value;
+
+        value = entry->value;
+
+        if (tiff->little_endian) {
+            raw[0] = (unsigned char)(value & 255UL);
+            raw[1] = (unsigned char)((value >> 8) & 255UL);
+            raw[2] = (unsigned char)((value >> 16) & 255UL);
+            raw[3] = (unsigned char)((value >> 24) & 255UL);
+        }
+        else {
+            raw[0] = (unsigned char)((value >> 24) & 255UL);
+            raw[1] = (unsigned char)((value >> 16) & 255UL);
+            raw[2] = (unsigned char)((value >> 8) & 255UL);
+            raw[3] = (unsigned char)(value & 255UL);
+        }
+
+        memcpy(buffer, raw, size);
+    }
+    else {
+        if (!tiff_range_ok(tiff,
+                           entry->value,
+                           size)) {
+            free(buffer);
+            return 0;
+        }
+
+        memcpy(buffer,
+               tiff->data + entry->value,
+               size);
+    }
+
+    *result = buffer;
+    *result_size = size;
+    return 1;
+}
+
+
+#endif /* MINITIFF_USE_STB_IMAGE */
+
+
 /* ------------------------------------------------------------------------- */
 /* Page cleanup                                                              */
 /* ------------------------------------------------------------------------- */
@@ -478,6 +557,9 @@ static void tiff_page_free(TIFF_Page *page)
     free(page->strip_offsets);
     free(page->strip_byte_counts);
     free(page->color_map);
+#ifdef MINITIFF_USE_STB_IMAGE
+    free(page->jpeg_tables);
+#endif
 
     memset(page, 0, sizeof(*page));
 }
@@ -687,6 +769,26 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
             }
             break;
 
+        case 347: /* JPEGTables */
+#ifdef MINITIFF_USE_STB_IMAGE
+            if (entry.type != 7) /* UNDEFINED */
+                return 0;
+
+            free(page->jpeg_tables);
+            page->jpeg_tables = NULL;
+            page->jpeg_tables_size = 0;
+
+            if (!tiff_copy_entry_bytes(
+                    tiff,
+                    &entry,
+                    &page->jpeg_tables,
+                    &page->jpeg_tables_size))
+                return 0;
+#else
+            /* JPEGTables is harmless when JPEG support is disabled. */
+#endif
+            break;
+
         default:
             /* Unknown tags are harmless; ignore them. */
             break;
@@ -729,6 +831,7 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
     if (page->compression != 1 &&
         page->compression != 5 &&
         page->compression != 6 &&
+        page->compression != 7 &&
         page->compression != 8 &&
         page->compression != 32773 &&
         page->compression != 32946)
@@ -765,7 +868,8 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
     }
 
     /* JPEG and Deflate are optional. */
-    if (page->compression == 6) {
+    if (page->compression == 6 ||
+        page->compression == 7) {
 #ifndef MINITIFF_USE_STB_IMAGE
         return 0;
 #endif
@@ -1107,25 +1211,115 @@ static int tiff_jpeg_decode(const unsigned char *src,
                             size_t dst_size,
                             unsigned long expected_width,
                             unsigned long expected_height,
-                            unsigned short expected_samples)
+                            unsigned short expected_samples,
+                            const unsigned char *jpeg_tables,
+                            size_t jpeg_tables_size)
 {
     int width;
     int height;
     int channels;
     unsigned char *decoded;
+    unsigned char *jpeg_data;
+    size_t jpeg_size;
+    size_t table_start;
+    size_t table_end;
+    size_t strip_start;
+    size_t strip_end;
+    size_t total_size;
     size_t decoded_size;
+    size_t pixel_count;
     size_t i;
 
-    if (src_size > (size_t)INT_MAX)
+    jpeg_data = NULL;
+    decoded = NULL;
+
+    /*
+        Compression 6/7 JPEG strips can use the JPEGTables tag.
+
+        A JPEGTables value normally looks like:
+
+            SOI + DQT/DHT/etc + EOI
+
+        while the strip contains:
+
+            SOI + SOF/SOS/data + EOI
+
+        stbi_load_from_memory() wants one complete JPEG stream, so
+        remove the wrapper markers and join the two parts.
+    */
+    table_start = 0;
+    table_end = jpeg_tables_size;
+    strip_start = 0;
+    strip_end = src_size;
+
+    if (jpeg_tables_size >= 2 &&
+        jpeg_tables[0] == 0xff &&
+        jpeg_tables[1] == 0xd8)
+        table_start = 2;
+
+    if (table_end >= table_start + 2 &&
+        jpeg_tables[table_end - 2] == 0xff &&
+        jpeg_tables[table_end - 1] == 0xd9)
+        table_end -= 2;
+
+    if (src_size >= 2 &&
+        src[0] == 0xff &&
+        src[1] == 0xd8)
+        strip_start = 2;
+
+    if (strip_end >= strip_start + 2 &&
+        src[strip_end - 2] == 0xff &&
+        src[strip_end - 1] == 0xd9)
+        strip_end -= 2;
+
+    if (!tiff_add_size(table_end - table_start,
+                       strip_end - strip_start,
+                       &total_size) ||
+        !tiff_add_size(total_size, 4, &total_size))
         return 0;
 
+    jpeg_data = (unsigned char *)malloc(total_size);
+    if (!jpeg_data)
+        return 0;
+
+    jpeg_size = 0;
+
+    /* SOI */
+    jpeg_data[jpeg_size++] = 0xff;
+    jpeg_data[jpeg_size++] = 0xd8;
+
+    if (table_end > table_start) {
+        memcpy(jpeg_data + jpeg_size,
+               jpeg_tables + table_start,
+               table_end - table_start);
+        jpeg_size += table_end - table_start;
+    }
+
+    if (strip_end > strip_start) {
+        memcpy(jpeg_data + jpeg_size,
+               src + strip_start,
+               strip_end - strip_start);
+        jpeg_size += strip_end - strip_start;
+    }
+
+    /* EOI */
+    jpeg_data[jpeg_size++] = 0xff;
+    jpeg_data[jpeg_size++] = 0xd9;
+
+    if (jpeg_size > (size_t)INT_MAX) {
+        free(jpeg_data);
+        return 0;
+    }
+
     decoded = stbi_load_from_memory(
-        src,
-        (int)src_size,
+        jpeg_data,
+        (int)jpeg_size,
         &width,
         &height,
         &channels,
         0);
+
+    free(jpeg_data);
 
     if (!decoded)
         return 0;
@@ -1136,10 +1330,6 @@ static int tiff_jpeg_decode(const unsigned char *src,
         return 0;
     }
 
-    /*
-        TIFF JPEG strips are commonly RGB or grayscale. Convert the result
-        to the exact number of bytes requested by the TIFF page.
-    */
     if (channels != 1 && channels != 2 &&
         channels != 3 && channels != 4) {
         stbi_image_free(decoded);
@@ -1148,8 +1338,8 @@ static int tiff_jpeg_decode(const unsigned char *src,
 
     if (!tiff_mul_size((size_t)width,
                        (size_t)height,
-                       &decoded_size) ||
-        !tiff_mul_size(decoded_size,
+                       &pixel_count) ||
+        !tiff_mul_size(pixel_count,
                        (size_t)expected_samples,
                        &decoded_size) ||
         decoded_size != dst_size) {
@@ -1157,21 +1347,29 @@ static int tiff_jpeg_decode(const unsigned char *src,
         return 0;
     }
 
-    for (i = 0; i < (size_t)width * (size_t)height; ++i) {
+    for (i = 0; i < pixel_count; ++i) {
         if (expected_samples == 1) {
-            if (channels == 1 || channels == 2)
+            if (channels == 1 || channels == 2) {
                 dst[i] = decoded[i * (size_t)channels];
+            }
             else {
-                /* Convert RGB JPEG to grayscale using a simple average. */
-                unsigned int r = decoded[i * (size_t)channels + 0];
-                unsigned int g = decoded[i * (size_t)channels + 1];
-                unsigned int b = decoded[i * (size_t)channels + 2];
+                unsigned int r;
+                unsigned int g;
+                unsigned int b;
+
+                r = decoded[i * (size_t)channels + 0];
+                g = decoded[i * (size_t)channels + 1];
+                b = decoded[i * (size_t)channels + 2];
+
                 dst[i] = (unsigned char)((r + g + b) / 3);
             }
         }
         else if (expected_samples == 3) {
             if (channels == 1 || channels == 2) {
-                unsigned char v = decoded[i * (size_t)channels];
+                unsigned char v;
+
+                v = decoded[i * (size_t)channels];
+
                 dst[i * 3 + 0] = v;
                 dst[i * 3 + 1] = v;
                 dst[i * 3 + 2] = v;
@@ -1184,7 +1382,10 @@ static int tiff_jpeg_decode(const unsigned char *src,
         }
         else if (expected_samples == 4) {
             if (channels == 1 || channels == 2) {
-                unsigned char v = decoded[i * (size_t)channels];
+                unsigned char v;
+
+                v = decoded[i * (size_t)channels];
+
                 dst[i * 4 + 0] = v;
                 dst[i * 4 + 1] = v;
                 dst[i * 4 + 2] = v;
@@ -1226,6 +1427,11 @@ static int tiff_decode_strip(const TIFF_Context *tiff,
 {
     unsigned long offset;
     unsigned long byte_count;
+
+#ifndef MINITIFF_USE_STB_IMAGE
+    (void)strip_width;
+    (void)strip_height;
+#endif
 
     if (strip >= page->strip_count)
         return 0;
@@ -1276,6 +1482,7 @@ static int tiff_decode_strip(const TIFF_Context *tiff,
 
 #ifdef MINITIFF_USE_STB_IMAGE
     case 6:
+    case 7:
         return tiff_jpeg_decode(
             tiff->data + offset,
             (size_t)byte_count,
@@ -1283,9 +1490,12 @@ static int tiff_decode_strip(const TIFF_Context *tiff,
             destination_size,
             strip_width,
             strip_height,
-            page->samples_per_pixel);
+            page->samples_per_pixel,
+            page->jpeg_tables,
+            page->jpeg_tables_size);
 #else
     case 6:
+    case 7:
         return 0;
 #endif
 
