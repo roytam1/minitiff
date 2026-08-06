@@ -1827,16 +1827,16 @@ static int tiff_convert_pixels(const TIFF_Context *tiff,
                     m = tiff_get_u16_sample(tiff, pixel + 2);
                     yy = tiff_get_u16_sample(tiff, pixel + 4);
                     k = tiff_get_u16_sample(tiff, pixel + 6);
-                    r = (unsigned char)(255UL - ((c + k > 65535UL) ? 65535UL : c + k) / 257UL);
-                    g = (unsigned char)(255UL - ((m + k > 65535UL) ? 65535UL : m + k) / 257UL);
-                    b = (unsigned char)(255UL - ((yy + k > 65535UL) ? 65535UL : yy + k) / 257UL);
+                    r = (unsigned char)(((65535UL - c) * (65535UL - k)) / 16842495UL);
+                    g = (unsigned char)(((65535UL - m) * (65535UL - k)) / 16842495UL);
+                    b = (unsigned char)(((65535UL - yy) * (65535UL - k)) / 16842495UL);
                 }
                 else {
                     pixel = row + (size_t)x * 4;
                     c = pixel[0]; m = pixel[1]; yy = pixel[2]; k = pixel[3];
-                    r = (unsigned char)(255UL - ((c + k > 255UL) ? 255UL : c + k));
-                    g = (unsigned char)(255UL - ((m + k > 255UL) ? 255UL : m + k));
-                    b = (unsigned char)(255UL - ((yy + k > 255UL) ? 255UL : yy + k));
+                    r = (unsigned char)(((255UL - c) * (255UL - k)) / 255UL);
+                    g = (unsigned char)(((255UL - m) * (255UL - k)) / 255UL);
+                    b = (unsigned char)(((255UL - yy) * (255UL - k)) / 255UL);
                 }
             }
             else {
