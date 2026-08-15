@@ -15,7 +15,7 @@ It is designed in the spirit of `stb_image`: compact, easy to read, and easy to 
 - Grayscale, palette, RGB, RGBA, and CMYK
 - TIFF Orientation handling
 - Horizontal Predictor (`Predictor = 2`)
-- Uncompressed, LZW, and PackBits
+- Uncompressed, LZW, CCITT Group 3/4, and PackBits
 - Optional JPEG through `stb_image`
 - Optional Deflate / Adobe Deflate through `stb_image`'s internal zlib decoder
 - JPEG-in-TIFF `JPEGTables` support

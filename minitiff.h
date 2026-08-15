@@ -1,5 +1,5 @@
 /*
-    minitiff_v4_c89.c
+    minitiff.h
 
     Small, human-readable TIFF decoder.
 
@@ -23,6 +23,7 @@
       - Orientation (tag 274), with pixels normalized to the displayed orientation
       - Generic UINT/STRING/raw tag access
       - Compression = 1   (none)
+      - Compression = 3 and 4 (CCITT)
       - Compression = 5   (LZW)
       - Compression = 32773 (PackBits)
       - Predictor = 1 and 2 for byte-oriented data
@@ -63,7 +64,7 @@
 
     Optional stb_image build:
 
-        cc -DMINITIFF_USE_STB_IMAGE -c minitiff_v4_c89.c
+        cc -DMINITIFF_USE_STB_IMAGE -c minitiff.h
 
     The application must arrange for stb_image's implementation to be built
     exactly once, for example:
@@ -76,7 +77,7 @@
         #define STB_IMAGE_IMPLEMENTATION
         #define MINITIFF_USE_STB_IMAGE
         #define MINITIFF_USE_STB_ZLIB
-        #include "minitiff_v4_c89.c"
+        #include "minitiff.h"
 */
 #ifndef _MINITFF_H
 #define _MINITFF_H
@@ -107,7 +108,7 @@
             #define STB_IMAGE_IMPLEMENTATION
             #define MINITIFF_USE_STB_IMAGE
             #define MINITIFF_USE_STB_ZLIB
-            #include "minitiff_v4_c89.c"
+            #include "minitiff.h"
 
         Do not compile stb_image.c separately in that configuration.
 */
