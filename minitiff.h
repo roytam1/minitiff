@@ -3003,12 +3003,26 @@ static int tiff_copy_block_to_image(const TIFF_Page *page,
                 bytes = (size_t)copy_width * page->samples_per_pixel * (bits / 8);
                 memcpy(dst_row + (size_t)dst_x * page->samples_per_pixel * (bits / 8), src_row, bytes);
             } else {
-                /* Packed samples: only whole-byte-aligned blocks can be copied directly. */
-                if ((dst_x * page->samples_per_pixel * bits) % 8 != 0 ||
-                    (copy_width * page->samples_per_pixel * bits) % 8 != 0)
-                    return 0;
-                memcpy(dst_row + (dst_x * page->samples_per_pixel * bits) / 8,
-                       src_row, (copy_width * page->samples_per_pixel * bits) / 8);
+                /* Packed samples: copy bit-by-bit for non-byte-aligned blocks. */
+                if ((dst_x * page->samples_per_pixel * bits) % 8 == 0 &&
+                    (copy_width * page->samples_per_pixel * bits) % 8 == 0) {
+                    memcpy(dst_row + (dst_x * page->samples_per_pixel * bits) / 8,
+                           src_row, (copy_width * page->samples_per_pixel * bits) / 8);
+                } else {
+                    unsigned long bx;
+                    for (bx = 0; bx < copy_width; ++bx) {
+                        unsigned long src_bit = bx * page->samples_per_pixel * bits;
+                        unsigned long dst_bit = ((dst_x + bx) * page->samples_per_pixel + plane) * bits;
+                        unsigned short bi;
+                        for (bi = 0; bi < bits; ++bi) {
+                            unsigned long sb = src_bit + bi;
+                            unsigned long db = dst_bit + bi;
+                            int sv = (src_row[sb / 8] >> (7 - (sb % 8))) & 1;
+                            if (sv)
+                                dst_row[db / 8] |= (unsigned char)(128u >> (db % 8));
+                        }
+                    }
+                }
             }
         } else {
             for (x = 0; x < copy_width; ++x) {
@@ -3551,17 +3565,20 @@ int main(int argc, char **argv)
 {
     MiniTIFF_Image *image;
     unsigned page;
+    unsigned long x, y;
+    const unsigned char *p;
+    FILE *out;
 
-    if (argc < 2) {
+    if (argc < 3) {
         fprintf(stderr,
-                "usage: %s file.tif [page]\n",
+                "usage: %s file.tif output.ppm [page]\n",
                 argv[0]);
         return 2;
     }
 
     page = 0;
-    if (argc >= 3)
-        page = (unsigned)strtoul(argv[2], NULL, 10);
+    if (argc >= 4)
+        page = (unsigned)strtoul(argv[3], NULL, 10);
 
     image = tiff_load_file(argv[1], page);
 
@@ -3570,9 +3587,28 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    printf("%lu x %lu RGBA8\n",
-           image->width,
-           image->height);
+    out = fopen(argv[2], "wb");
+    if (!out) {
+        fprintf(stderr, "cannot open %s for writing\n", argv[2]);
+        tiff_free(image);
+        return 1;
+    }
+
+    fprintf(out, "P6\n%lu %lu\n255\n", image->width, image->height);
+
+    p = image->pixels;
+    for (y = 0; y < image->height; ++y) {
+        for (x = 0; x < image->width; ++x) {
+            fputc(p[0], out);
+            fputc(p[1], out);
+            fputc(p[2], out);
+            p += 4;
+        }
+    }
+
+    fclose(out);
+    printf("%lu x %lu PPM written to %s\n",
+           image->width, image->height, argv[2]);
 
     tiff_free(image);
     return 0;
