@@ -2451,7 +2451,7 @@ static int tiff_jbig_decode(const unsigned char *src,
     unsigned char *decoded;
     unsigned char *buf;
     size_t buf_size;
-    size_t pixel_bytes;
+    size_t packed_size;
 
     /* Build the 20-byte BIH */
     buf_size = src_size + 20;
@@ -2497,13 +2497,16 @@ static int tiff_jbig_decode(const unsigned char *src,
         return 0;
     }
 
-    pixel_bytes = (size_t)expected_width * (size_t)expected_height;
-    if (pixel_bytes != dst_size) {
+    /* stb_jbig returns packed 1bpp, MSB-first, byte-aligned per row.
+       Output size = ((width + 7) / 8) * height, matching TIFF's
+       destination buffer layout. */
+    packed_size = ((expected_width + 7UL) / 8UL) * expected_height;
+    if (packed_size != dst_size) {
         stbi_jbig_free(decoded);
         return 0;
     }
 
-    memcpy(dst, decoded, pixel_bytes);
+    memcpy(dst, decoded, packed_size);
 
     stbi_jbig_free(decoded);
     return 1;
