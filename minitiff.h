@@ -2449,44 +2449,14 @@ static int tiff_jbig_decode(const unsigned char *src,
     int height;
     int planes;
     unsigned char *decoded;
-    unsigned char *buf;
-    size_t buf_size;
     size_t packed_size;
 
-    /* Build the 20-byte BIH */
-    buf_size = src_size + 20;
-    buf = (unsigned char *)malloc(buf_size);
-    if (!buf)
-        return 0;
-
-    buf[0] = 0;           /* DL = 0 (base layer) */
-    buf[1] = 0;           /* D  = 0 (base layer) */
-    buf[2] = (unsigned char)(samples_per_pixel ? samples_per_pixel : 1);
-    buf[3] = 0;           /* reserved */
-    buf[4] = (unsigned char)((expected_width >> 24) & 0xff);
-    buf[5] = (unsigned char)((expected_width >> 16) & 0xff);
-    buf[6] = (unsigned char)((expected_width >>  8) & 0xff);
-    buf[7] = (unsigned char)((expected_width      ) & 0xff);
-    buf[8] = (unsigned char)((expected_height >> 24) & 0xff);
-    buf[9] = (unsigned char)((expected_height >> 16) & 0xff);
-    buf[10] = (unsigned char)((expected_height >>  8) & 0xff);
-    buf[11] = (unsigned char)((expected_height      ) & 0xff);
-    buf[12] = 0; buf[13] = 0; buf[14] = 0; buf[15] = (unsigned char)128; /* L0 = 128 */
-    buf[16] = 0;           /* MX = 0 */
-    buf[17] = 0;           /* MY = 0 */
-    buf[18] = 0;           /* order: stripe-first, MSB-first, etc. */
-    buf[19] = 0;           /* options: all defaults */
-
-    memcpy(buf + 20, src, src_size);
-
     decoded = stbi_jbig_load_from_memory(
-        buf,
-        (int)buf_size,
+        src,
+        (int)src_size,
         &width,
         &height,
         &planes);
-
-    free(buf);
 
     if (!decoded)
         return 0;
