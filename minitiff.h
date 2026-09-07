@@ -27,6 +27,7 @@
       - Compression = 1   (none)
       - Compression = 3 and 4 (CCITT)
       - Compression = 5   (LZW)
+      - Compression = 34661 (JBIG, optional)
       - Compression = 32773 (PackBits)
       - Predictor = 1 and 2 for byte-oriented data
 
@@ -48,6 +49,16 @@
         Use stb_image's internal zlib decoder for Deflate
         (Compression = 8 and 32946). This is deliberately optional because
         stb_image's internal zlib routines are not a stable public API.
+
+      MINITIFF_USE_STB_JBIG
+
+        Include stb_jbig.h and use stbi_jbig_load_from_memory() for JBIG
+        strips (Compression = 10).
+
+        The user must provide stb_jbig.h in the include path.
+
+        This source does NOT define STB_JBIG_IMPLEMENTATION. The application
+        should do that once, in one C file, before including stb_jbig.h.
 
     Example:
 
@@ -74,11 +85,23 @@
         #define STB_IMAGE_IMPLEMENTATION
         #include "stb_image.h"
 
-    Optional stb_image build:
+    Optional stb_jbig build:
+
+        cc -DMINITIFF_USE_STB_JBIG -c minitiff.h
+
+    The application must arrange for stb_jbig's implementation to be built
+    exactly once, for example:
+
+        #define STB_JBIG_IMPLEMENTATION
+        #include "stb_jbig.h"
+
+    Combined build:
 
         #define STB_IMAGE_IMPLEMENTATION
+        #define STB_JBIG_IMPLEMENTATION
         #define MINITIFF_USE_STB_IMAGE
         #define MINITIFF_USE_STB_ZLIB
+        #define MINITIFF_USE_STB_JBIG
         #include "minitiff.h"
 */
 #ifndef _MINITFF_H
@@ -100,6 +123,9 @@
 
     MINITIFF_USE_STB_ZLIB requires MINITIFF_USE_STB_IMAGE.
 
+    MINITIFF_USE_STB_JBIG:
+        JBIG decoding through stb_jbig.h.
+
     IMPORTANT:
         Because stb_image's zlib functions are static/private, when
         MINITIFF_USE_STB_ZLIB is enabled this file must be compiled in
@@ -116,6 +142,10 @@
 */
 #ifdef MINITIFF_USE_STB_IMAGE
 #include "stb_image.h"
+#endif
+
+#ifdef MINITIFF_USE_STB_JBIG
+#include "stb_jbig.h"
 #endif
 
 #ifdef MINITIFF_USE_STB_ZLIB
@@ -969,6 +999,7 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
         page->compression != 6 &&
         page->compression != 7 &&
         page->compression != 8 &&
+        page->compression != 34661 &&
         page->compression != 32773 &&
         page->compression != 32946)
         return 0;
@@ -1046,6 +1077,12 @@ static int tiff_parse_ifd(const TIFF_Context *tiff,
     if (page->compression == 8 ||
         page->compression == 32946) {
 #ifndef MINITIFF_USE_STB_ZLIB
+        return 0;
+#endif
+    }
+
+    if (page->compression == 34661) {
+#ifndef MINITIFF_USE_STB_JBIG
         return 0;
 #endif
     }
@@ -2377,6 +2414,56 @@ static int tiff_jpeg_decode(const unsigned char *src,
 
 
 /* ------------------------------------------------------------------------- */
+/* JBIG-in-TIFF decoder                                                      */
+/* ------------------------------------------------------------------------- */
+
+#ifdef MINITIFF_USE_STB_JBIG
+
+static int tiff_jbig_decode(const unsigned char *src,
+                            size_t src_size,
+                            unsigned char *dst,
+                            size_t dst_size,
+                            unsigned long expected_width,
+                            unsigned long expected_height)
+{
+    int width;
+    int height;
+    int planes;
+    unsigned char *decoded;
+    size_t pixel_bytes;
+
+    decoded = stbi_jbig_load_from_memory(
+        src,
+        (int)src_size,
+        &width,
+        &height,
+        &planes);
+
+    if (!decoded)
+        return 0;
+
+    if ((unsigned long)width != expected_width ||
+        (unsigned long)height != expected_height) {
+        stbi_jbig_free(decoded);
+        return 0;
+    }
+
+    pixel_bytes = (size_t)expected_width * (size_t)expected_height;
+    if (pixel_bytes != dst_size) {
+        stbi_jbig_free(decoded);
+        return 0;
+    }
+
+    memcpy(dst, decoded, pixel_bytes);
+
+    stbi_jbig_free(decoded);
+    return 1;
+}
+
+#endif /* MINITIFF_USE_STB_JBIG */
+
+
+/* ------------------------------------------------------------------------- */
 /* Strip decoding                                                            */
 /* ------------------------------------------------------------------------- */
 
@@ -2806,6 +2893,14 @@ static int tiff_decode_block(const TIFF_Context *tiff,
 #else
     case 6:
     case 7:
+        return 0;
+#endif
+#ifdef MINITIFF_USE_STB_JBIG
+    case 34661:
+        return tiff_jbig_decode(tiff->data + offset, (size_t)byte_count, destination, destination_size,
+                                block_width, block_height);
+#else
+    case 34661:
         return 0;
 #endif
     default:
