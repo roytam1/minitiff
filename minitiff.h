@@ -2419,25 +2419,74 @@ static int tiff_jpeg_decode(const unsigned char *src,
 
 #ifdef MINITIFF_USE_STB_JBIG
 
+/*
+    JBIG-in-TIFF strips do not include the 20-byte BIH (Basic Information
+    Header) that the JBIG decoder expects.  We reconstruct the BIH from the
+    TIFF tags: ImageWidth, ImageLength and SamplesPerPixel.
+
+    BIH layout (20 bytes, big-endian):
+        0   DL        (differential layer, 0 for base)
+        1   D         (highest layer, 0 for base)
+        2   planes    (number of bit planes)
+        3   reserved  (0)
+        4-7 XLW       (width of image)
+        8-11  YLW     (height of image)
+        12-15 L0      (recommended stripe length, 128 = standard default)
+        16  MX        (max horizontal offset, 0 = default)
+        17  MY        (max vertical offset, 0 = default)
+        18  order     (0 = default: stripe-first, MSB-first)
+        19  options   (0 = default)
+*/
 static int tiff_jbig_decode(const unsigned char *src,
                             size_t src_size,
                             unsigned char *dst,
                             size_t dst_size,
                             unsigned long expected_width,
-                            unsigned long expected_height)
+                            unsigned long expected_height,
+                            unsigned short samples_per_pixel)
 {
     int width;
     int height;
     int planes;
     unsigned char *decoded;
+    unsigned char *buf;
+    size_t buf_size;
     size_t pixel_bytes;
 
+    /* Build the 20-byte BIH */
+    buf_size = src_size + 20;
+    buf = (unsigned char *)malloc(buf_size);
+    if (!buf)
+        return 0;
+
+    buf[0] = 0;           /* DL = 0 (base layer) */
+    buf[1] = 0;           /* D  = 0 (base layer) */
+    buf[2] = (unsigned char)(samples_per_pixel ? samples_per_pixel : 1);
+    buf[3] = 0;           /* reserved */
+    buf[4] = (unsigned char)((expected_width >> 24) & 0xff);
+    buf[5] = (unsigned char)((expected_width >> 16) & 0xff);
+    buf[6] = (unsigned char)((expected_width >>  8) & 0xff);
+    buf[7] = (unsigned char)((expected_width      ) & 0xff);
+    buf[8] = (unsigned char)((expected_height >> 24) & 0xff);
+    buf[9] = (unsigned char)((expected_height >> 16) & 0xff);
+    buf[10] = (unsigned char)((expected_height >>  8) & 0xff);
+    buf[11] = (unsigned char)((expected_height      ) & 0xff);
+    buf[12] = 0; buf[13] = 0; buf[14] = 0; buf[15] = (unsigned char)128; /* L0 = 128 */
+    buf[16] = 0;           /* MX = 0 */
+    buf[17] = 0;           /* MY = 0 */
+    buf[18] = 0;           /* order: stripe-first, MSB-first, etc. */
+    buf[19] = 0;           /* options: all defaults */
+
+    memcpy(buf + 20, src, src_size);
+
     decoded = stbi_jbig_load_from_memory(
-        src,
-        (int)src_size,
+        buf,
+        (int)buf_size,
         &width,
         &height,
         &planes);
+
+    free(buf);
 
     if (!decoded)
         return 0;
@@ -2898,7 +2947,7 @@ static int tiff_decode_block(const TIFF_Context *tiff,
 #ifdef MINITIFF_USE_STB_JBIG
     case 34661:
         return tiff_jbig_decode(tiff->data + offset, (size_t)byte_count, destination, destination_size,
-                                block_width, block_height);
+                                block_width, block_height, page->samples_per_pixel);
 #else
     case 34661:
         return 0;
