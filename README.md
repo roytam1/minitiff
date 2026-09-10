@@ -15,10 +15,13 @@ It is designed in the spirit of `stb_image`: compact, easy to read, and easy to 
 - Grayscale, palette, RGB, RGBA, and CMYK
 - TIFF Orientation handling
 - Horizontal Predictor (`Predictor = 2`)
-- Uncompressed, LZW, CCITT Group 3/4, and PackBits
+- FillOrder = 1 and 2 for packed samples (including sub-byte bit order swap)
+- Uncompressed, LZW, CCITT Group 3/4, PackBits, and JBIG
 - Optional JPEG through `stb_image`
 - Optional Deflate / Adobe Deflate through `stb_image`'s internal zlib decoder
+- Optional JBIG through `stb_jbig.h` (compression 34661)
 - JPEG-in-TIFF `JPEGTables` support
+- RGB555 heuristic for antique TIFFs mislabeled as 16-bit grayscale
 - Basic generic TIFF tag access
 - No mandatory third-party dependencies
 - C89-compatible implementation
@@ -151,7 +154,7 @@ Define `MINITIFF_USE_STB_IMAGE` to use `stb_image.h` for JPEG decoding.
 #define MINITIFF_USE_STB_IMAGE
 
 #include "stb_image.h"
-#include "minitiff_v4_c89.c"
+#include "minitiff.h"
 ```
 
 MiniTIFF supports JPEG-in-TIFF files using TIFF compression 6/7, including files whose JPEG tables are stored separately in `JPEGTables` (tag 347).
@@ -171,6 +174,20 @@ MiniTIFF can then reuse stb_image's internal zlib decoder for TIFF Deflate (8) a
 
 This avoids a mandatory external zlib dependency. The trade-off is that stb_image's zlib decoder is an internal, non-public API, so the bridge may need adjustment if stb_image changes its internals.
 
+## Optional JBIG support
+
+Define `MINITIFF_USE_STB_JBIG` to use `stb_jbig.h` for JBIG decoding (compression 34661).
+
+```c
+#define STB_JBIG_IMPLEMENTATION
+#define MINITIFF_USE_STB_JBIG
+
+#include "stb_jbig.h"
+#include "minitiff.h"
+```
+
+JBIG-in-TIFF strips do not include the JBIG Basic Information Header (BIH), so MiniTIFF reconstructs it from the TIFF `ImageWidth`, `ImageLength`, and `SamplesPerPixel` tags before passing the data to the decoder.
+
 ## CMYK
 
 CMYK TIFFs (`PhotometricInterpretation = 5`) use a simple dependency-free multiplicative conversion to RGB.
@@ -189,18 +206,60 @@ This is **not ICC color management**. Without an ICC profile, CMYK values do not
 
 ## Build
 
-MiniTIFF is C89-compatible:
+MiniTIFF is C89-compatible. It ships as a single header file (`minitiff.h`).
 
-```sh
-cc -std=c89 -pedantic -Wall -Wextra minitiff_v4_c89.c
+### As a header-only library
+
+Include `minitiff.h` in one C file with `MINITIFF_IMPLEMENTATION`:
+
+```c
+#define MINITIFF_IMPLEMENTATION
+#include "minitiff.h"
 ```
 
-For the optional test program, if enabled by the source:
+### With optional features
+
+Combined build with all optional decoders:
+
+```c
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_JBIG_IMPLEMENTATION
+#define MINITIFF_IMPLEMENTATION
+#define MINITIFF_USE_STB_IMAGE
+#define MINITIFF_USE_STB_ZLIB
+#define MINITIFF_USE_STB_JBIG
+
+#include "minitiff.h"
+```
+
+### With stb_image (JPEG + Deflate)
+
+```c
+#define STB_IMAGE_IMPLEMENTATION
+#define MINITIFF_IMPLEMENTATION
+#define MINITIFF_USE_STB_IMAGE
+#define MINITIFF_USE_STB_ZLIB
+
+#include "minitiff.h"
+```
+
+### Test program
+
+Define `TIFF_TEST` to enable the built-in test program, which loads a TIFF and writes a PPM image:
 
 ```sh
-cc -std=c89 -pedantic -Wall -Wextra \
-    -DMINITIFF_TEST \
-    minitiff_v4_c89.c -o minitiff_test
+cc -std=c89 -Wall -Wextra -static \
+    -DSTB_JBIG_IMPLEMENTATION \
+    -DMINITIFF_IMPLEMENTATION \
+    -DMINITIFF_USE_STB_JBIG \
+    -DTIFF_TEST \
+    minitiff.h -o minitiff_ppm
+```
+
+Usage:
+
+```sh
+minitiff_ppm input.tif output.ppm [page]
 ```
 
 ## Limitations
@@ -224,15 +283,15 @@ Not currently implemented as full features:
 2. No mandatory external dependencies
 3. Small, readable source
 4. Good compatibility with common real-world TIFF files
-5. Optional stb_image integration
+5. Optional stb_image and stb_jbig integration
 6. Easy to modify for embedded and legacy projects
 
 ## License
 
 Public Domain. If a license is needed, WTFPL. And if a **proper** license is really needed, MIT.
 
-If you distribute `stb_image.h` with MiniTIFF, retain the license and attribution required by the version of `stb_image.h` you use.
+If you distribute `stb_image.h` or `stb_jbig.h` with MiniTIFF, retain the license and attribution required by the version of those files you use.
 
 ## Status
 
-MiniTIFF is currently a TIFF **decoder**. The implementation and API may evolve as additional real-world TIFF files are tested.
+MiniTIFF is currently a TIFF **decoder**. It handles a wide range of real-world TIFF files including antique and non-conformant formats. The implementation and API may evolve as additional real-world TIFF files are tested.
