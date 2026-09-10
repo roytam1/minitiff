@@ -176,7 +176,7 @@ This avoids a mandatory external zlib dependency. The trade-off is that stb_imag
 
 ## Optional JBIG support
 
-Define `MINITIFF_USE_STB_JBIG` to use `stb_jbig.h` for JBIG decoding (compression 34661).
+Define `MINITIFF_USE_STB_JBIG` to use [stb_jbig.h](https://github.com/roytam1/stb_jbig) for JBIG decoding (compression 34661).
 
 ```c
 #define STB_JBIG_IMPLEMENTATION
@@ -185,8 +185,6 @@ Define `MINITIFF_USE_STB_JBIG` to use `stb_jbig.h` for JBIG decoding (compressio
 #include "stb_jbig.h"
 #include "minitiff.h"
 ```
-
-JBIG-in-TIFF strips do not include the JBIG Basic Information Header (BIH), so MiniTIFF reconstructs it from the TIFF `ImageWidth`, `ImageLength`, and `SamplesPerPixel` tags before passing the data to the decoder.
 
 ## CMYK
 
